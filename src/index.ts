@@ -74,7 +74,7 @@ client.on("messageCreate", async (message) => {
     )
     if (matched) {
       tupperSession.lastActiveTupper[matched.userId] = matched.slotIndex
-      matched.avatarUrl = message.author.displayAvatarURL({ size: 256 })
+      matched.avatarUrl = message.author.avatarURL({ extension: "png", size: 256 }) ?? message.author.displayAvatarURL({ size: 256 })
       console.log(`[TUPPER] updated lastActiveTupper: ${matched.userId} → slot ${matched.slotIndex} (${matched.name}) avatar=${matched.avatarUrl}`)
       if (tupperSession.state === "lobby") {
         updateLobbyMessage(tupperSession, client).catch(console.error)
