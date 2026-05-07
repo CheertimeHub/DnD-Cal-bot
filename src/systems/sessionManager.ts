@@ -18,6 +18,9 @@ export function createSession(
     state: "lobby",
     maxSlots,
     enemies: [],
+    pendingActions: [],
+    activeAttacks: [],
+    combatLog: [],
   }
   sessions.set(channelId, session)
   return session

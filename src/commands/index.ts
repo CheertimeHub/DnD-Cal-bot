@@ -2,8 +2,8 @@ import { SlashCommandBuilder } from "discord.js"
 
 export const commands = [
   new SlashCommandBuilder()
-    .setName("start-session")
-    .setDescription("Open a new DnD session in this channel"),
+    .setName("lobby")
+    .setDescription("Open a new DnD lobby in this channel"),
 
   new SlashCommandBuilder()
     .setName("adjust-slots")
