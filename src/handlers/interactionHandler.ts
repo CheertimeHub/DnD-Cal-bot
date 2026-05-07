@@ -26,13 +26,16 @@ import {
   buildPlayerEmbed,
 } from "../utils/embed"
 import { getDefaultHp } from "../utils/classHp"
-import { findForumMonsterStat, findForumPostImage } from "../utils/forumSearch"
+import { findForumMonsterStat, findForumPostImage, getImageFromThreadId, listForumThreads } from "../utils/forumSearch"
 import { CombatActionType, CombatActor, Player, Session } from "../types/session"
 
 // ── pending spawn ─────────────────────────────────────────────────────────────
 
 interface PendingSpawn { name: string; count: number; hp: number; imageUrl: string | null }
 const pendingSpawns = new Map<string, PendingSpawn>()
+
+// เก็บ rollText ไว้แยกต่างหาก เพราะ customId จำกัด 100 ตัวอักษร
+const pendingRollTexts = new Map<string, string>()  // key = `${userId}_${value}` → rollText
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
@@ -44,29 +47,23 @@ async function getLobbyMeta(session: Session, client: Client) {
   return { channelName, hostTag: host.tag }
 }
 
-async function buildPlayerImages(session: Session, client: Client): Promise<Record<string, string>> {
-  const result: Record<string, string> = {}
-  if (!session.forumChannelId) return result
-  const guild = await client.guilds.fetch(session.guildId)
-  const registered = session.players.filter((p): p is Player => p !== null && p.name !== "")
-  await Promise.all(
-    registered.map(async (p) => {
-      const url = await findForumPostImage(guild, session.forumChannelId!, p.name)
-      if (url) result[p.userId] = url
-    })
-  )
+function buildPlayerImages(session: Session): Record<number, string> {
+  const result: Record<number, string> = {}
+  for (const p of session.players) {
+    if (p && p.name && p.avatarUrl) result[p.slotIndex] = p.avatarUrl
+  }
   return result
 }
 
-async function updateLobbyMessage(session: Session, client: Client): Promise<void> {
+export async function updateLobbyMessage(session: Session, client: Client): Promise<void> {
   const { channelName, hostTag } = await getLobbyMeta(session, client)
   const guild = await client.guilds.fetch(session.guildId)
   const channel = (await guild.channels.fetch(session.channelId)) as TextChannel
   const msg = await channel.messages.fetch(session.lobbyMessageId)
 
-  const playerImages = await buildPlayerImages(session, client)
+  const playerImages = buildPlayerImages(session)
   const registered = session.players.filter((p): p is Player => p !== null && p.name !== "")
-  const playerEmbeds = registered.map((p) => buildPlayerEmbed(p, playerImages[p.userId]))
+  const playerEmbeds = registered.map((p) => buildPlayerEmbed(p, playerImages[p.slotIndex]))
 
   await msg.edit({
     embeds: [buildLobbyEmbed(session, channelName, hostTag), ...playerEmbeds],
@@ -392,7 +389,10 @@ async function handleCombatTakeButton(interaction: ButtonInteraction, client: Cl
   const result = combatManager.takeHit(session, attackId, interaction.user.id)
   if (!result.consumed) { await interaction.reply({ content: result.message ?? "Cannot take hit.", ephemeral: true }); return }
 
-  await interaction.reply({ content: result.message, ephemeral: true })
+  await interaction.update({ content: "✅", components: [] })
+  const channel = interaction.channel as TextChannel
+  if (result.message) await channel.send(result.message).catch(console.error)
+  if (result.deathMessage) await channel.send(result.deathMessage).catch(console.error)
   updateCombatMessage(session, client).catch(console.error)
 }
 
@@ -541,6 +541,27 @@ async function handleRegisterPlayerModal(interaction: ModalSubmitInteraction, cl
 
   await interaction.reply({ content: `Registered **${name}** the **${className}** with ${maxHp} HP (Slot ${slotIndex + 1}).`, ephemeral: true })
   updateLobbyMessage(sessionManager.getSession(session.channelId)!, client).catch(console.error)
+
+  // ถ้ามี forum → ให้เลือก thread เพื่อ link รูป (เฉพาะถ้าไม่มี tupperName หรือยังไม่มี avatarUrl)
+  const updatedSession = sessionManager.getSession(session.channelId)!
+  const registeredPlayer = updatedSession.players[slotIndex]
+  if (updatedSession.forumChannelId && registeredPlayer && !registeredPlayer.avatarUrl) {
+    try {
+      const guild = await client.guilds.fetch(updatedSession.guildId)
+      const threads = await listForumThreads(guild, updatedSession.forumChannelId)
+      if (threads.length > 0) {
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId(`link_avatar_${slotIndex}`)
+          .setPlaceholder("เลือก thread ตัวละครของคุณ (ถ้ามีรูป)")
+          .addOptions(threads.map((t) => ({ label: t.name.slice(0, 100), value: t.id })))
+        await interaction.followUp({
+          content: "เลือก forum thread เพื่อดึงรูปตัวละคร (ข้ามได้ถ้าไม่ต้องการ):",
+          components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
+          ephemeral: true,
+        })
+      }
+    } catch { /* ไม่มี forum ก็ข้ามไป */ }
+  }
 }
 
 async function handleAdjustSlotsModal(interaction: ModalSubmitInteraction, client: Client) {
@@ -702,7 +723,6 @@ export function buildRollIntentMessage(
   )
   if (controllable.length === 0) return null
 
-  const encoded = encodeURIComponent(rollText.slice(0, 80))
   // priority: Tupper match โดยตรง → lastActiveTupper → controllable[0]
   const lastSlot = session.lastActiveTupper[userId]
   const source = matchedPlayer
@@ -712,13 +732,18 @@ export function buildRollIntentMessage(
       : controllable[0]
   const sourceKey = combatManager.encodeActor(source)
 
+  // เก็บ rollText แยกต่างหาก เพราะ customId จำกัด 100 ตัวอักษร
+  const rollKey = `${userId}_${value}`
+  pendingRollTexts.set(rollKey, rollText)
+  setTimeout(() => pendingRollTexts.delete(rollKey), 120_000)
+
   const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
-      .setCustomId(`roll_intent_attack_${userId}_${value}_${sourceKey}_${encoded}`)
+      .setCustomId(`roll_intent_attack_${userId}_${value}_${sourceKey}`)
       .setLabel("⚔️ Attack")
       .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
-      .setCustomId(`roll_intent_heal_${userId}_${value}_${sourceKey}_${encoded}`)
+      .setCustomId(`roll_intent_heal_${userId}_${value}_${sourceKey}`)
       .setLabel("🩹 Heal")
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
@@ -735,8 +760,8 @@ export function buildRollIntentMessage(
 
 async function handleRollIntentButton(interaction: ButtonInteraction, client: Client) {
   const parts = interaction.customId.split("_")
-  // roll_intent_{action}_{userId}_{value}_{sourceKey}_{encoded}
-  // parts: [roll, intent, action, userId, value, sourceKey, ...encoded]
+  // roll_intent_{action}_{userId}_{value}_{sourceKey}
+  // parts: [roll, intent, action, userId, value, sourceKey]
   const action = parts[2] as "attack" | "heal" | "cancel"
 
   if (action === "cancel") {
@@ -747,7 +772,6 @@ async function handleRollIntentButton(interaction: ButtonInteraction, client: Cl
   const userId = parts[3]
   const value = parseInt(parts[4], 10)
   const sourceKey = parts[5]
-  const rollText = decodeURIComponent(parts.slice(6).join("_"))
 
   if (interaction.user.id !== userId) {
     await interaction.reply({ content: "นี่ไม่ใช่ roll ของคุณ", ephemeral: true })
@@ -763,10 +787,8 @@ async function handleRollIntentButton(interaction: ButtonInteraction, client: Cl
   const targetRow = buildTargetSelect(session, action, source)
   if (!targetRow) { await interaction.update({ content: "ไม่มีเป้าหมายที่เลือกได้", components: [] }); return }
 
-  // เก็บ value + rollText ไว้ใน customId ของ dropdown
-  const encoded = encodeURIComponent(rollText.slice(0, 80))
   const menu = (targetRow.components[0] as StringSelectMenuBuilder)
-    .setCustomId(`roll_intent_target_${action}_${sourceKey}_${value}_${encoded}`)
+    .setCustomId(`roll_intent_target_${action}_${sourceKey}_${value}`)
 
   await interaction.update({
     content: `**${combatManager.getActorLabel(session, source)}** → เลือกเป้าหมาย:`,
@@ -780,14 +802,15 @@ async function handleRollIntentTargetSelect(interaction: StringSelectMenuInterac
   const firstUnderscore = withoutPrefix.indexOf("_")
   const action = withoutPrefix.slice(0, firstUnderscore) as "attack" | "heal"
   const rest = withoutPrefix.slice(firstUnderscore + 1)
-  // sourceKey = "player:0" or "enemy:E1" -contains one underscore
-  // format: {type}:{id}_{value}_{encoded}
-  const sourceMatch = rest.match(/^(player:\d+|enemy:[^_]+)_(\d+)_(.+)$/)
+  // format: {type}:{id}_{value}
+  const sourceMatch = rest.match(/^(player:\d+|enemy:[^_]+)_(\d+)$/)
   if (!sourceMatch) { await interaction.update({ content: "Invalid data.", components: [] }); return }
 
   const sourceKey = sourceMatch[1]
   const value = parseInt(sourceMatch[2], 10)
-  const rollText = decodeURIComponent(sourceMatch[3])
+  const userId = interaction.user.id
+  const rollText = pendingRollTexts.get(`${userId}_${value}`) ?? ""
+  pendingRollTexts.delete(`${userId}_${value}`)
 
   const session = sessionManager.getSession(interaction.channelId!)
   if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
@@ -829,6 +852,31 @@ async function handleEndSessionCommand(interaction: ChatInputCommandInteraction,
   await updateCombatMessage(session, client).catch(console.error)
 }
 
+async function handleLinkAvatarSelect(interaction: StringSelectMenuInteraction, client: Client) {
+  const slotIndex = parseInt(interaction.customId.replace("link_avatar_", ""), 10)
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
+
+  const player = session.players[slotIndex]
+  if (!player || player.userId !== interaction.user.id) {
+    await interaction.reply({ content: "นี่ไม่ใช่ slot ของคุณ", ephemeral: true }); return
+  }
+
+  const threadId = interaction.values[0]
+  try {
+    const guild = await client.guilds.fetch(session.guildId)
+    const imageUrl = await getImageFromThreadId(guild, threadId)
+    if (imageUrl) {
+      player.avatarUrl = imageUrl
+      await interaction.update({ content: `เชื่อม thread สำเร็จ`, components: [] })
+    } else {
+      await interaction.update({ content: "ไม่พบรูปใน thread นั้น (ลองเลือก thread อื่น)", components: [] })
+    }
+  } catch {
+    await interaction.update({ content: "เกิดข้อผิดพลาด ลองใหม่อีกครั้ง", components: [] })
+  }
+}
+
 // ── main router ───────────────────────────────────────────────────────────────
 
 export async function handleInteraction(interaction: Interaction, client: Client): Promise<void> {
@@ -862,6 +910,7 @@ export async function handleInteraction(interaction: Interaction, client: Client
     if (interaction.customId.startsWith("roll_intent_target_")) return handleRollIntentTargetSelect(interaction, client)
     if (interaction.customId === "combat_monster_source") return handleCombatMonsterSourceSelect(interaction, client)
     if (interaction.customId.startsWith("combat_monster_target_")) return handleCombatMonsterTargetSelect(interaction, client)
+    if (interaction.customId.startsWith("link_avatar_")) return handleLinkAvatarSelect(interaction, client)
   }
 
   if (interaction.isModalSubmit()) {

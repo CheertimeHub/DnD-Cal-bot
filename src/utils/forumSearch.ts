@@ -40,6 +40,50 @@ async function getHpFromThread(thread: ThreadChannel): Promise<number | null> {
   }
 }
 
+export async function listForumThreads(
+  guild: Guild,
+  forumChannelId: string
+): Promise<{ id: string; name: string }[]> {
+  try {
+    const channel = await guild.channels.fetch(forumChannelId)
+    if (!channel || channel.type !== ChannelType.GuildForum) return []
+    const [{ threads: active }, { threads: archived }] = await Promise.all([
+      channel.threads.fetchActive(),
+      channel.threads.fetchArchived(),
+    ])
+    const all = [...active.values(), ...archived.values()]
+    return all.map((t) => ({ id: t.id, name: t.name })).slice(0, 25)
+  } catch {
+    return []
+  }
+}
+
+export async function getImageFromThreadId(
+  guild: Guild,
+  threadId: string
+): Promise<string | null> {
+  try {
+    const thread = await guild.channels.fetch(threadId)
+    console.log(`[FORUM] fetched thread: ${thread?.id} type=${thread?.type}`)
+    if (!thread || !("fetchStarterMessage" in thread)) return null
+    const starter = await (thread as ThreadChannel).fetchStarterMessage({ cache: false })
+    console.log(`[FORUM] starter message: ${starter?.id} attachments=${starter?.attachments.size} embeds=${starter?.embeds.length}`)
+    if (!starter) return null
+    const img = starter.attachments.find((a) => a.contentType?.startsWith("image/") ?? false)
+    console.log(`[FORUM] image attachment: ${img?.url ?? "none"}`)
+    // fallback: embed image (ลิงก์รูปที่ Discord auto-embed)
+    if (!img) {
+      const embedImg = starter.embeds.find((e) => e.image?.url)?.image?.url ?? null
+      console.log(`[FORUM] embed image: ${embedImg ?? "none"}`)
+      return embedImg
+    }
+    return img.url
+  } catch (e) {
+    console.log(`[FORUM] error: ${e}`)
+    return null
+  }
+}
+
 export async function findForumPostImage(
   guild: Guild,
   forumChannelId: string,

@@ -9,6 +9,7 @@ export interface Player {
   maxHp: number
   slotIndex: number
   tupperName?: string
+  avatarUrl?: string
 }
 
 export interface Enemy {

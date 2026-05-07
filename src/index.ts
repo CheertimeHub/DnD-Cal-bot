@@ -2,7 +2,7 @@ import "dotenv/config"
 import { Message } from "discord.js"
 import { Player } from "./types/session"
 import client from "./bot"
-import { buildAttackResponseRow, buildRollIntentMessage, handleInteraction, updateCombatMessage } from "./handlers/interactionHandler"
+import { buildAttackResponseRow, buildRollIntentMessage, handleInteraction, updateCombatMessage, updateLobbyMessage } from "./handlers/interactionHandler"
 import * as combatManager from "./systems/combatManager"
 import * as sessionManager from "./systems/sessionManager"
 import { Session } from "./types/session"
@@ -67,13 +67,22 @@ client.on("messageCreate", async (message) => {
   const tupperSession = sessionManager.getSession(message.channelId)
   if (tupperSession && !isRollemBot(message)) {
     const username = message.author.username.toLowerCase()
+    console.log(`[TUPPER] checking username="${username}" against slots: ${tupperSession.players.filter(Boolean).map((p) => `${p?.tupperName ?? "-"}`).join(", ")}`)
     const matched = tupperSession.players.find(
       (p): p is Player => p !== null && p.name !== "" && !!p.tupperName &&
       p.tupperName.toLowerCase() === username
     )
     if (matched) {
       tupperSession.lastActiveTupper[matched.userId] = matched.slotIndex
-      console.log(`[TUPPER] updated lastActiveTupper: ${matched.userId} → slot ${matched.slotIndex} (${matched.name})`)
+      matched.avatarUrl = message.author.displayAvatarURL({ size: 256 })
+      console.log(`[TUPPER] updated lastActiveTupper: ${matched.userId} → slot ${matched.slotIndex} (${matched.name}) avatar=${matched.avatarUrl}`)
+      if (tupperSession.state === "lobby") {
+        updateLobbyMessage(tupperSession, client).catch(console.error)
+      } else if (tupperSession.state === "combat") {
+        updateCombatMessage(tupperSession, client).catch(console.error)
+      }
+    } else {
+      console.log(`[TUPPER] no match found for "${username}"`)
     }
   }
 
