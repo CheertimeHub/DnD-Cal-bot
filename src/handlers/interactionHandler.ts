@@ -104,7 +104,7 @@ export async function updateCombatMessage(session: Session, client: Client): Pro
 export function buildAttackResponseRow(attackId: string): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`combat_dodge_${attackId}`).setLabel("🛡️ Dodge").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`combat_take_${attackId}`).setLabel("💥 Take Hit").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`combat_take_${attackId}`).setLabel("⚔️ Take Hit").setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId(`combat_cancel_${attackId}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
   )
 }
@@ -116,7 +116,8 @@ function buildCombatActionRows(session: Session): ActionRowBuilder<ButtonBuilder
     rows.push(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId("combat_action_attack").setLabel("⚔️ Attack").setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId("combat_action_heal").setLabel("💊 Heal").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("combat_action_heal").setLabel("🩹 Heal").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("combat_action_monster").setLabel("🐉 Monster Attack").setStyle(ButtonStyle.Secondary),
       )
     )
 
@@ -124,7 +125,7 @@ function buildCombatActionRows(session: Session): ActionRowBuilder<ButtonBuilder
       rows.push(
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder().setCustomId(`combat_dodge_${attack.id}`).setLabel("🛡️ Dodge").setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`combat_take_${attack.id}`).setLabel("💥 Take Hit").setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`combat_take_${attack.id}`).setLabel("⚔️ Take Hit").setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(`combat_cancel_${attack.id}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
         )
       )
@@ -144,9 +145,16 @@ function buildTargetSelect(
   source: CombatActor
 ): ActionRowBuilder<StringSelectMenuBuilder> | null {
   const sourceKey = combatManager.encodeActor(source)
-  const actors = combatManager.getActors(session).filter(
-    (a) => action === "heal" || combatManager.encodeActor(a) !== sourceKey
-  )
+  let actors: CombatActor[]
+  if (action === "heal") {
+    // heal: เฉพาะ player (รวม dead), ไม่กรอง source ออก
+    actors = combatManager.getActors(session).filter((a) => a.type === "player")
+  } else {
+    // attack: เฉพาะ actor ที่ยังมีชีวิต, ไม่รวม source
+    actors = combatManager.getActors(session, true).filter(
+      (a) => combatManager.encodeActor(a) !== sourceKey
+    )
+  }
   if (actors.length === 0) return null
   return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
     new StringSelectMenuBuilder()
@@ -186,6 +194,9 @@ function makeRegisterModal(slotIndex: number) {
     ),
     new ActionRowBuilder<TextInputBuilder>().addComponents(
       new TextInputBuilder().setCustomId("char_hp").setLabel("Max HP").setStyle(TextInputStyle.Short).setMaxLength(5).setRequired(false)
+    ),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(
+      new TextInputBuilder().setCustomId("tupper_name").setLabel("Tupperbox name (optional)").setStyle(TextInputStyle.Short).setMaxLength(64).setRequired(false)
     )
   )
 }
@@ -239,8 +250,10 @@ function buildSpawnManualRow(name: string, count: number) {
 async function executeSpawn(channelId: string, guildId: string, name: string, count: number, hp: number, client: Client) {
   sessionManager.spawnEnemies(channelId, name, count, hp)
   const session = sessionManager.getSession(channelId)!
-  await updateCombatMessage(session, client)
-  if (session.state === "lobby" && session.lobbyMessageId) {
+  // อัปเดต combat embed เฉพาะตอน combat แล้ว -lobby ยังไม่สร้าง embed
+  if (session.state === "combat") {
+    await updateCombatMessage(session, client)
+  } else if (session.lobbyMessageId) {
     updateLobbyMessage(session, client).catch(console.error)
   }
 }
@@ -292,7 +305,7 @@ async function handleStartSessionButton(interaction: ButtonInteraction, client: 
   if (session.hostId !== interaction.user.id) { await interaction.reply({ content: "Only DM can start.", ephemeral: true }); return }
 
   session.state = "combat"
-  await interaction.reply({ content: "✅ Session started!", ephemeral: true })
+  await interaction.reply({ content: ">>> # ระบบกำลังดำเนินการ" })
   await updateCombatMessage(session, client)
 }
 
@@ -300,8 +313,8 @@ async function handleCombatAttackButton(interaction: ButtonInteraction) {
   const session = sessionManager.getSession(interaction.channelId!)
   if (!session) { await interaction.reply({ content: "Session not found.", ephemeral: true }); return }
 
-  // หา source อัตโนมัติ — ถ้าผู้เล่นคุมตัวเดียวก็ข้ามขั้นตอนเลือก source
-  const controllable = combatManager.getActors(session).filter(
+  // หา source อัตโนมัติ -เฉพาะ actor ที่มีชีวิตและ user ควบคุมได้
+  const controllable = combatManager.getActors(session, true).filter(
     (a) => combatManager.canControlActor(session, interaction.user.id, a)
   )
   if (controllable.length === 0) { await interaction.reply({ content: "No actor you can control.", ephemeral: true }); return }
@@ -467,7 +480,7 @@ async function handleCombatTargetSelect(interaction: StringSelectMenuInteraction
   const channel = interaction.channel as TextChannel
   await interaction.update({ content: "✅ Done.", components: [] })
   await channel.send(
-    `**${combatManager.getActorLabel(session, source)}** ${verb} **${combatManager.getActorLabel(session, target)}** — <@${interaction.user.id}> roll now! (e.g. \`d20\`)`
+    `**${combatManager.getActorLabel(session, source)}** ${verb} **${combatManager.getActorLabel(session, target)}** -<@${interaction.user.id}> roll now! (e.g. \`d20\`)`
   )
   updateCombatMessage(session, client).catch(console.error)
 }
@@ -513,6 +526,7 @@ async function handleRegisterPlayerModal(interaction: ModalSubmitInteraction, cl
   const name = interaction.fields.getTextInputValue("char_name").trim()
   const className = interaction.fields.getTextInputValue("char_class").trim()
   const hpRaw = interaction.fields.getTextInputValue("char_hp").trim()
+  const tupperName = interaction.fields.getTextInputValue("tupper_name").trim() || undefined
 
   let maxHp: number
   if (hpRaw) {
@@ -522,7 +536,7 @@ async function handleRegisterPlayerModal(interaction: ModalSubmitInteraction, cl
     maxHp = getDefaultHp(className)
   }
 
-  const success = sessionManager.registerPlayer(session.channelId, { userId: interaction.user.id, slotIndex, name, className, maxHp })
+  const success = sessionManager.registerPlayer(session.channelId, { userId: interaction.user.id, slotIndex, name, className, maxHp, tupperName })
   if (!success) { await interaction.reply({ content: "Could not register this slot.", ephemeral: true }); return }
 
   await interaction.reply({ content: `Registered **${name}** the **${className}** with ${maxHp} HP (Slot ${slotIndex + 1}).`, ephemeral: true })
@@ -581,6 +595,240 @@ async function handleSpawnMonsterStatModal(interaction: ModalSubmitInteraction, 
   await interaction.editReply({ content: `Spawned **${name}** x${count}.` })
 }
 
+// ── monster attack ────────────────────────────────────────────────────────────
+
+function buildMonsterTargetSelect(session: Session, source: CombatActor): ActionRowBuilder<StringSelectMenuBuilder> {
+  const alivePlayers = combatManager.getActors(session, true).filter((a) => a.type === "player")
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`combat_monster_target_${combatManager.encodeActor(source)}`)
+      .setPlaceholder("เลือกเป้าหมาย")
+      .addOptions(alivePlayers.slice(0, 25).map((a) => actorOption(session, a)))
+  )
+}
+
+async function handleCombatMonsterButton(interaction: ButtonInteraction, client: Client) {
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.reply({ content: "Session not found.", ephemeral: true }); return }
+  if (session.hostId !== interaction.user.id) {
+    await interaction.reply({ content: "เฉพาะ DM เท่านั้นที่สั่งมอนโจมตีได้", ephemeral: true }); return
+  }
+
+  const aliveEnemies = combatManager.getActors(session, true).filter((a) => a.type === "enemy")
+  if (aliveEnemies.length === 0) { await interaction.reply({ content: "ไม่มีมอนที่มีชีวิตอยู่", ephemeral: true }); return }
+
+  const alivePlayers = combatManager.getActors(session, true).filter((a) => a.type === "player")
+  if (alivePlayers.length === 0) { await interaction.reply({ content: "ไม่มีผู้เล่นที่มีชีวิตอยู่", ephemeral: true }); return }
+
+  if (aliveEnemies.length === 1) {
+    const targetRow = buildMonsterTargetSelect(session, aliveEnemies[0])
+    await interaction.reply({ content: `**${combatManager.getActorLabel(session, aliveEnemies[0])}** → เลือกเป้าหมาย:`, components: [targetRow], ephemeral: true })
+    return
+  }
+
+  const sourceRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId("combat_monster_source")
+      .setPlaceholder("เลือกมอนที่จะโจมตี")
+      .addOptions(aliveEnemies.slice(0, 25).map((a) => actorOption(session, a)))
+  )
+  await interaction.reply({ content: "เลือกมอน:", components: [sourceRow], ephemeral: true })
+}
+
+async function handleCombatMonsterSourceSelect(interaction: StringSelectMenuInteraction, client: Client) {
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
+
+  const source = combatManager.decodeActor(interaction.values[0])
+  if (!source) { await interaction.update({ content: "Invalid actor.", components: [] }); return }
+
+  const targetRow = buildMonsterTargetSelect(session, source)
+  await interaction.update({
+    content: `**${combatManager.getActorLabel(session, source)}** → เลือกเป้าหมาย:`,
+    components: [targetRow],
+  })
+}
+
+async function handleCombatMonsterTargetSelect(interaction: StringSelectMenuInteraction, client: Client) {
+  // customId: combat_monster_target_{sourceKey}
+  const sourceKey = interaction.customId.replace("combat_monster_target_", "")
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
+
+  const source = combatManager.decodeActor(sourceKey)
+  const target = combatManager.decodeActor(interaction.values[0])
+  if (!source || !target) { await interaction.update({ content: "Invalid actor.", components: [] }); return }
+
+  const result = combatManager.monsterAttack(session, source, target, interaction.user.id)
+  await interaction.update({ content: "✅ Done.", components: [] })
+
+  const channel = interaction.channel as TextChannel
+  if (result.message) await channel.send(result.message).catch(console.error)
+
+  if (result.activeAttack && result.activeAttack.status === "awaiting_response") {
+    const targetEntity = combatManager.getActorEntity(session, result.activeAttack.target)
+    const mention = targetEntity && "userId" in targetEntity ? `<@${(targetEntity as import("../types/session").Player).userId}>` : ""
+    await channel.send({
+      content: `${mention} -choose your response:`,
+      components: [buildAttackResponseRow(result.activeAttack.id)],
+    }).catch(console.error)
+  }
+
+  await updateCombatMessage(session, client).catch(console.error)
+}
+
+async function handleMonsterRollCommand(interaction: ChatInputCommandInteraction) {
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.reply({ content: "No active session.", ephemeral: true }); return }
+  if (session.hostId !== interaction.user.id) { await interaction.reply({ content: "Only DM can change this.", ephemeral: true }); return }
+
+  const mode = interaction.options.getString("mode", true) as "auto" | "manual"
+  sessionManager.setMonsterRollMode(session.channelId, mode)
+  const label = mode === "auto" ? "Auto (บอท roll ให้)" : "Manual (DM ทอยเอง)"
+  await interaction.reply({ content: `Monster roll mode: **${label}**`, ephemeral: true })
+}
+
+// ── roll intent (roll-first flow) ─────────────────────────────────────────────
+
+export function buildRollIntentMessage(
+  session: Session,
+  userId: string,
+  value: number,
+  rollText: string,
+  matchedPlayer?: Player
+): { content: string; components: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] } | null {
+  const controllable = combatManager.getActors(session, true).filter(
+    (a) => combatManager.canControlActor(session, userId, a)
+  )
+  if (controllable.length === 0) return null
+
+  const encoded = encodeURIComponent(rollText.slice(0, 80))
+  // priority: Tupper match โดยตรง → lastActiveTupper → controllable[0]
+  const lastSlot = session.lastActiveTupper[userId]
+  const source = matchedPlayer
+    ? controllable.find((a) => a.type === "player" && a.id === String(matchedPlayer.slotIndex)) ?? controllable[0]
+    : lastSlot !== undefined
+      ? controllable.find((a) => a.type === "player" && a.id === String(lastSlot)) ?? controllable[0]
+      : controllable[0]
+  const sourceKey = combatManager.encodeActor(source)
+
+  const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`roll_intent_attack_${userId}_${value}_${sourceKey}_${encoded}`)
+      .setLabel("⚔️ Attack")
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`roll_intent_heal_${userId}_${value}_${sourceKey}_${encoded}`)
+      .setLabel("🩹 Heal")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`roll_intent_cancel_${userId}`)
+      .setLabel("ยกเลิก")
+      .setStyle(ButtonStyle.Secondary),
+  )
+
+  return {
+    content: `**${combatManager.getActorLabel(session, source)}** ทอยได้ **${value}** -จะทำอะไร?`,
+    components: [actionRow],
+  }
+}
+
+async function handleRollIntentButton(interaction: ButtonInteraction, client: Client) {
+  const parts = interaction.customId.split("_")
+  // roll_intent_{action}_{userId}_{value}_{sourceKey}_{encoded}
+  // parts: [roll, intent, action, userId, value, sourceKey, ...encoded]
+  const action = parts[2] as "attack" | "heal" | "cancel"
+
+  if (action === "cancel") {
+    await interaction.update({ content: "ยกเลิกแล้ว", components: [] })
+    return
+  }
+
+  const userId = parts[3]
+  const value = parseInt(parts[4], 10)
+  const sourceKey = parts[5]
+  const rollText = decodeURIComponent(parts.slice(6).join("_"))
+
+  if (interaction.user.id !== userId) {
+    await interaction.reply({ content: "นี่ไม่ใช่ roll ของคุณ", ephemeral: true })
+    return
+  }
+
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
+
+  const source = combatManager.decodeActor(sourceKey)
+  if (!source) { await interaction.update({ content: "Invalid actor.", components: [] }); return }
+
+  const targetRow = buildTargetSelect(session, action, source)
+  if (!targetRow) { await interaction.update({ content: "ไม่มีเป้าหมายที่เลือกได้", components: [] }); return }
+
+  // เก็บ value + rollText ไว้ใน customId ของ dropdown
+  const encoded = encodeURIComponent(rollText.slice(0, 80))
+  const menu = (targetRow.components[0] as StringSelectMenuBuilder)
+    .setCustomId(`roll_intent_target_${action}_${sourceKey}_${value}_${encoded}`)
+
+  await interaction.update({
+    content: `**${combatManager.getActorLabel(session, source)}** → เลือกเป้าหมาย:`,
+    components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
+  })
+}
+
+async function handleRollIntentTargetSelect(interaction: StringSelectMenuInteraction, client: Client) {
+  // customId: roll_intent_target_{action}_{sourceKey}_{value}_{encoded}
+  const withoutPrefix = interaction.customId.replace("roll_intent_target_", "")
+  const firstUnderscore = withoutPrefix.indexOf("_")
+  const action = withoutPrefix.slice(0, firstUnderscore) as "attack" | "heal"
+  const rest = withoutPrefix.slice(firstUnderscore + 1)
+  // sourceKey = "player:0" or "enemy:E1" -contains one underscore
+  // format: {type}:{id}_{value}_{encoded}
+  const sourceMatch = rest.match(/^(player:\d+|enemy:[^_]+)_(\d+)_(.+)$/)
+  if (!sourceMatch) { await interaction.update({ content: "Invalid data.", components: [] }); return }
+
+  const sourceKey = sourceMatch[1]
+  const value = parseInt(sourceMatch[2], 10)
+  const rollText = decodeURIComponent(sourceMatch[3])
+
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
+
+  const source = combatManager.decodeActor(sourceKey)
+  const target = combatManager.decodeActor(interaction.values[0])
+  if (!source || !target) { await interaction.update({ content: "Invalid actor.", components: [] }); return }
+
+  combatManager.startPendingAction(session, { userId: interaction.user.id, type: action, source, target })
+  const result = combatManager.consumeRollemRoll(session, interaction.user.id, value, rollText)
+
+  await interaction.update({ content: "✅ Done.", components: [] })
+
+  const channel = interaction.channel as TextChannel
+  if (result.activeAttack && result.activeAttack.status === "awaiting_response") {
+    const targetEntity = combatManager.getActorEntity(session, result.activeAttack.target)
+    const mention = targetEntity && "userId" in targetEntity ? `<@${(targetEntity as import("../types/session").Player).userId}>` : ""
+    await channel.send({
+      content: `${result.message}\n${mention} -choose your response:`,
+      components: [buildAttackResponseRow(result.activeAttack.id)],
+    }).catch(console.error)
+  } else if (result.message) {
+    await channel.send(result.message).catch(console.error)
+  }
+  if (result.deathMessage) await channel.send(result.deathMessage).catch(console.error)
+  if (result.sessionEnded) await channel.send(">>> # ดำเนินการระบบเสร็จสิ้น").catch(console.error)
+
+  await updateCombatMessage(session, client).catch(console.error)
+}
+
+async function handleEndSessionCommand(interaction: ChatInputCommandInteraction, client: Client) {
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.reply({ content: "No active session.", ephemeral: true }); return }
+  if (session.hostId !== interaction.user.id) { await interaction.reply({ content: "Only DM can end the session.", ephemeral: true }); return }
+
+  session.state = "ended"
+  await interaction.reply({ content: ">>> # ดำเนินการระบบเสร็จสิ้น" })
+  const channel = interaction.channel as TextChannel
+  await updateCombatMessage(session, client).catch(console.error)
+}
+
 // ── main router ───────────────────────────────────────────────────────────────
 
 export async function handleInteraction(interaction: Interaction, client: Client): Promise<void> {
@@ -588,6 +836,8 @@ export async function handleInteraction(interaction: Interaction, client: Client
     if (interaction.commandName === "lobby") return handleLobbyCommand(interaction)
     if (interaction.commandName === "adjust-slots") return handleAdjustSlotsCommand(interaction)
     if (interaction.commandName === "spawn-monster") return handleSpawnMonsterCommand(interaction)
+    if (interaction.commandName === "end-session") return handleEndSessionCommand(interaction, client)
+    if (interaction.commandName === "monster-roll") return handleMonsterRollCommand(interaction)
   }
 
   if (interaction.isButton()) {
@@ -601,12 +851,17 @@ export async function handleInteraction(interaction: Interaction, client: Client
     if (interaction.customId === "spawn_confirm") return handleSpawnConfirmButton(interaction, client)
     if (interaction.customId === "spawn_edit") return handleSpawnEditButton(interaction)
     if (interaction.customId.startsWith("spawn_manual_")) return handleSpawnManualButton(interaction)
+    if (interaction.customId.startsWith("roll_intent_")) return handleRollIntentButton(interaction, client)
+    if (interaction.customId === "combat_action_monster") return handleCombatMonsterButton(interaction, client)
   }
 
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === "select_forum_channel") return handleForumSelectMenu(interaction, client)
     if (interaction.customId.startsWith("combat_source_")) return handleCombatSourceSelect(interaction)
     if (interaction.customId.startsWith("combat_target_")) return handleCombatTargetSelect(interaction, client)
+    if (interaction.customId.startsWith("roll_intent_target_")) return handleRollIntentTargetSelect(interaction, client)
+    if (interaction.customId === "combat_monster_source") return handleCombatMonsterSourceSelect(interaction, client)
+    if (interaction.customId.startsWith("combat_monster_target_")) return handleCombatMonsterTargetSelect(interaction, client)
   }
 
   if (interaction.isModalSubmit()) {

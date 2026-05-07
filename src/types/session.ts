@@ -1,4 +1,5 @@
 export type SessionState = "lobby" | "combat" | "ended"
+export type MonsterRollMode = "manual" | "auto"
 
 export interface Player {
   userId: string
@@ -7,6 +8,7 @@ export interface Player {
   hp: number
   maxHp: number
   slotIndex: number
+  tupperName?: string
 }
 
 export interface Enemy {
@@ -65,4 +67,6 @@ export interface Session {
   pendingActions: PendingRollAction[]
   activeAttacks: ActiveAttack[]
   combatLog: CombatLogEntry[]
+  monsterRollMode: MonsterRollMode
+  lastActiveTupper: Record<string, number>  // userId → slotIndex
 }

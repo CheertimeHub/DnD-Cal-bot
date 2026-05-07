@@ -126,7 +126,7 @@ export function buildCombatEmbed(session: Session): EmbedBuilder {
   if (session.combatLog.length > 0) {
     embed.addFields({
       name: "Log",
-      value: session.combatLog.slice(0, 5).map((l) => l.message).join("\n"),
+      value: session.combatLog.slice(0, 5).reverse().map((l) => l.message).join("\n"),
       inline: false,
     })
   }

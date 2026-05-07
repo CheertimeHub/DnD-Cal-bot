@@ -12,7 +12,9 @@ import {
 export interface RollConsumeResult {
   consumed: boolean
   message?: string
+  deathMessage?: string
   activeAttack?: ActiveAttack
+  sessionEnded?: boolean
 }
 
 function nextId(prefix: string): string {
@@ -41,12 +43,13 @@ export function getRegisteredPlayers(session: Session): Player[] {
   return session.players.filter((p): p is Player => p !== null && p.name !== "")
 }
 
-export function getActors(session: Session): CombatActor[] {
-  const players = getRegisteredPlayers(session).map((p) => ({
-    type: "player" as const,
-    id: String(p.slotIndex),
-  }))
-  const enemies = session.enemies.map((e) => ({ type: "enemy" as const, id: e.id }))
+export function getActors(session: Session, excludeDead = false): CombatActor[] {
+  const players = getRegisteredPlayers(session)
+    .filter((p) => !excludeDead || p.hp > 0)
+    .map((p) => ({ type: "player" as const, id: String(p.slotIndex) }))
+  const enemies = session.enemies
+    .filter((e) => !excludeDead || e.hp > 0)
+    .map((e) => ({ type: "enemy" as const, id: e.id }))
   return [...players, ...enemies]
 }
 
@@ -63,7 +66,23 @@ export function getActorLabel(session: Session, actor: CombatActor): string {
   const entity = getActorEntity(session, actor)
   if (!entity) return actorKey(actor)
   if (actor.type === "player") return (entity as Player).name
-  return `${(entity as Enemy).id}: ${(entity as Enemy).name}`
+  return (entity as Enemy).name
+}
+
+export function getActorLabelWithId(session: Session, actor: CombatActor): string {
+  const entity = getActorEntity(session, actor)
+  if (!entity) return actorKey(actor)
+  if (actor.type === "player") return (entity as Player).name
+  const enemy = entity as Enemy
+  const sameNameEnemies = session.enemies.filter((e) => e.name === enemy.name)
+  if (sameNameEnemies.length <= 1) return enemy.name
+  const index = sameNameEnemies.findIndex((e) => e.id === enemy.id) + 1
+  return `${enemy.name} (${index})`
+}
+
+export function isActorDead(session: Session, actor: CombatActor): boolean {
+  const entity = getActorEntity(session, actor)
+  return !!entity && entity.hp === 0
 }
 
 export function canControlActor(session: Session, userId: string, actor: CombatActor): boolean {
@@ -82,23 +101,36 @@ export function addCombatLog(session: Session, message: string): CombatLogEntry 
   return entry
 }
 
-function setHp(session: Session, actor: CombatActor, hp: number): number | null {
-  const entity = getActorEntity(session, actor)
-  if (!entity) return null
-  entity.hp = clamp(hp, 0, entity.maxHp)
-  return entity.hp
+interface DamageResult {
+  hp: number | null
+  died: boolean
 }
 
-function damageActor(session: Session, actor: CombatActor, amount: number): number | null {
+function damageActor(session: Session, actor: CombatActor, amount: number): DamageResult {
   const entity = getActorEntity(session, actor)
-  if (!entity) return null
-  return setHp(session, actor, entity.hp - Math.max(0, amount))
+  if (!entity) return { hp: null, died: false }
+  const newHp = clamp(entity.hp - Math.max(0, amount), 0, entity.maxHp)
+  const died = entity.hp > 0 && newHp === 0
+  entity.hp = newHp
+  return { hp: newHp, died }
 }
 
 function healActor(session: Session, actor: CombatActor, amount: number): number | null {
   const entity = getActorEntity(session, actor)
   if (!entity) return null
-  return setHp(session, actor, entity.hp + Math.max(0, amount))
+  entity.hp = clamp(entity.hp + Math.max(0, amount), 0, entity.maxHp)
+  return entity.hp
+}
+
+function deathMessage(session: Session, actor: CombatActor): string {
+  const entity = getActorEntity(session, actor)
+  if (!entity) return ""
+  const label = getActorLabelWithId(session, actor)
+  return actor.type === "enemy" ? `💀 ${label} ถูกสังหาร!` : `💀 ${label} ล้มลง!`
+}
+
+function checkAllEnemiesDead(session: Session): boolean {
+  return session.enemies.length > 0 && session.enemies.every((e) => e.hp === 0)
 }
 
 export function startPendingAction(
@@ -130,32 +162,40 @@ export function consumeRollemRoll(
   if (!pending) return { consumed: false }
 
   if (pending.type === "damage") {
-    const hp = damageActor(session, pending.target, numericValue)
-    if (hp === null) return { consumed: true, message: "Target not found." }
-    const message = `${getActorLabel(session, pending.source)} dealt ${numericValue} damage to ${getActorLabel(session, pending.target)} (${hp} HP left).`
+    const { hp, died } = damageActor(session, pending.target, numericValue)
+    if (hp === null) return { consumed: true, message: "ไม่พบเป้าหมาย" }
+    const label = getActorLabelWithId(session, pending.target)
+    const message = `⚔️ ${getActorLabel(session, pending.source)} โจมตี ${label} ทำดาเมจ ${numericValue} (${label} เหลือ ${hp} HP)`
     addCombatLog(session, message)
-    return { consumed: true, message }
+    const death = died ? deathMessage(session, pending.target) : undefined
+    const sessionEnded = died && checkAllEnemiesDead(session)
+    if (sessionEnded) session.state = "ended"
+    return { consumed: true, message, deathMessage: death, sessionEnded }
   }
 
   if (pending.type === "heal") {
     const hp = healActor(session, pending.target, numericValue)
-    if (hp === null) return { consumed: true, message: "Target not found." }
-    const message = `${getActorLabel(session, pending.source)} healed ${getActorLabel(session, pending.target)} for ${numericValue} (${hp} HP).`
+    if (hp === null) return { consumed: true, message: "ไม่พบเป้าหมาย" }
+    const entity = getActorEntity(session, pending.target)
+    const label = getActorLabelWithId(session, pending.target)
+    const message = `🩹 ${getActorLabel(session, pending.source)} ฮีล ${label} +${numericValue} HP (เหลือ ${hp}/${entity?.maxHp ?? "?"} HP)`
     addCombatLog(session, message)
     return { consumed: true, message }
   }
 
   if (pending.type === "attack") {
-    // enemy target → deal damage immediately (monsters don't dodge)
     if (pending.target.type === "enemy") {
-      const hp = damageActor(session, pending.target, numericValue)
-      if (hp === null) return { consumed: true, message: "Target not found." }
-      const message = `${getActorLabel(session, pending.source)} dealt ${numericValue} damage to ${getActorLabel(session, pending.target)} (${hp} HP left).`
+      const { hp, died } = damageActor(session, pending.target, numericValue)
+      if (hp === null) return { consumed: true, message: "ไม่พบเป้าหมาย" }
+      const label = getActorLabelWithId(session, pending.target)
+      const message = `⚔️ ${getActorLabel(session, pending.source)} โจมตี ${label} ทำดาเมจ ${numericValue} (${label} เหลือ ${hp} HP)`
       addCombatLog(session, message)
-      return { consumed: true, message }
+      const death = died ? deathMessage(session, pending.target) : undefined
+      const sessionEnded = died && checkAllEnemiesDead(session)
+      if (sessionEnded) session.state = "ended"
+      return { consumed: true, message, deathMessage: death, sessionEnded }
     }
 
-    // player target → create activeAttack and wait for Dodge or Take Hit
     const activeAttack: ActiveAttack = {
       id: nextId("atk"),
       attacker: pending.source,
@@ -170,8 +210,7 @@ export function consumeRollemRoll(
       activeAttack,
       ...session.activeAttacks.filter((a) => a.status === "awaiting_response").slice(0, 4),
     ]
-    const message = `${getActorLabel(session, pending.source)} attacks ${getActorLabel(session, pending.target)} with ${numericValue}. Waiting for Dodge or Take Hit.`
-    addCombatLog(session, message)
+    const message = `${getActorLabel(session, pending.source)} โจมตี ${getActorLabel(session, pending.target)} ด้วย ${numericValue} - รอการตอบสนอง`
     return { consumed: true, message, activeAttack }
   }
 
@@ -184,23 +223,25 @@ export function consumeRollemRoll(
 
 export function takeHit(session: Session, attackId: string, userId: string): RollConsumeResult {
   const attack = session.activeAttacks.find((a) => a.id === attackId && a.status === "awaiting_response")
-  if (!attack) return { consumed: false, message: "Attack not found." }
+  if (!attack) return { consumed: false, message: "ไม่พบการโจมตี" }
   if (!canRespondForTarget(session, userId, attack.target)) {
-    return { consumed: false, message: "You cannot resolve this target." }
+    return { consumed: false, message: "คุณไม่สามารถรับผลแทนเป้าหมายนี้ได้" }
   }
 
-  const hp = damageActor(session, attack.target, attack.attackValue)
+  const { hp, died } = damageActor(session, attack.target, attack.attackValue)
   attack.status = "resolved"
-  const message = `${getActorLabel(session, attack.target)} took ${attack.attackValue} damage from ${getActorLabel(session, attack.attacker)} (${hp ?? 0} HP left).`
+  const label = getActorLabelWithId(session, attack.target)
+  const message = `⚔️ ${label} รับดาเมจ ${attack.attackValue} จาก ${getActorLabel(session, attack.attacker)} (เหลือ ${hp ?? 0} HP)`
   addCombatLog(session, message)
-  return { consumed: true, message, activeAttack: attack }
+  const death = died ? deathMessage(session, attack.target) : undefined
+  return { consumed: true, message, deathMessage: death, activeAttack: attack }
 }
 
 export function requestDodge(session: Session, attackId: string, userId: string): RollConsumeResult {
   const attack = session.activeAttacks.find((a) => a.id === attackId && a.status === "awaiting_response")
-  if (!attack) return { consumed: false, message: "Attack not found." }
+  if (!attack) return { consumed: false, message: "ไม่พบการโจมตี" }
   if (!canRespondForTarget(session, userId, attack.target)) {
-    return { consumed: false, message: "You cannot dodge for this target." }
+    return { consumed: false, message: "คุณไม่สามารถหลบแทนเป้าหมายนี้ได้" }
   }
   startPendingAction(session, {
     userId,
@@ -209,8 +250,7 @@ export function requestDodge(session: Session, attackId: string, userId: string)
     target: attack.attacker,
     activeAttackId: attack.id,
   })
-  const message = `${getActorLabel(session, attack.target)} is dodging. Roll with Rollem now.`
-  addCombatLog(session, message)
+  const message = `${getActorLabel(session, attack.target)} กำลังหลบ - ทอยเต๋าตอนนี้!`
   return { consumed: true, message, activeAttack: attack }
 }
 
@@ -221,32 +261,75 @@ export function resolveDodge(
   dodgeValue: number
 ): RollConsumeResult {
   const attack = session.activeAttacks.find((a) => a.id === attackId && a.status === "awaiting_response")
-  if (!attack) return { consumed: true, message: "Attack not found." }
+  if (!attack) return { consumed: true, message: "ไม่พบการโจมตี" }
   if (!canRespondForTarget(session, userId, attack.target)) {
-    return { consumed: true, message: "You cannot dodge for this target." }
+    return { consumed: true, message: "คุณไม่สามารถหลบแทนเป้าหมายนี้ได้" }
   }
 
   attack.status = "resolved"
-  if (dodgeValue > attack.attackValue) {
-    const message = `${getActorLabel(session, attack.target)} dodged! (${dodgeValue} vs ${attack.attackValue}) No damage.`
+  if (dodgeValue >= attack.attackValue) {
+    const message = `🛡️ ${getActorLabel(session, attack.target)} หลบการโจมตีสำเร็จ (${dodgeValue} vs ${attack.attackValue})`
     addCombatLog(session, message)
     return { consumed: true, message, activeAttack: attack }
   }
 
-  const hp = damageActor(session, attack.target, attack.attackValue)
-  const message = `${getActorLabel(session, attack.target)} failed to dodge (${dodgeValue} vs ${attack.attackValue}) and took ${attack.attackValue} damage (${hp ?? 0} HP left).`
+  const { hp, died } = damageActor(session, attack.target, attack.attackValue)
+  const label = getActorLabelWithId(session, attack.target)
+  const message = `⚔️ ${label} หลบไม่ทัน (${dodgeValue} vs ${attack.attackValue}) รับดาเมจ ${attack.attackValue} (เหลือ ${hp ?? 0} HP)`
+  addCombatLog(session, message)
+  const death = died ? deathMessage(session, attack.target) : undefined
+  return { consumed: true, message, deathMessage: death, activeAttack: attack }
+}
+
+export function cancelAttack(session: Session, attackId: string, userId: string): RollConsumeResult {
+  if (session.hostId !== userId) return { consumed: false, message: "เฉพาะ DM เท่านั้นที่ยกเลิกการโจมตีได้" }
+  const attack = session.activeAttacks.find((a) => a.id === attackId && a.status === "awaiting_response")
+  if (!attack) return { consumed: false, message: "ไม่พบการโจมตี" }
+  attack.status = "cancelled"
+  const message = `🚫 DM ยกเลิกการโจมตีของ ${getActorLabel(session, attack.attacker)}`
   addCombatLog(session, message)
   return { consumed: true, message, activeAttack: attack }
 }
 
-export function cancelAttack(session: Session, attackId: string, userId: string): RollConsumeResult {
-  if (session.hostId !== userId) return { consumed: false, message: "Only DM can cancel attacks." }
-  const attack = session.activeAttacks.find((a) => a.id === attackId && a.status === "awaiting_response")
-  if (!attack) return { consumed: false, message: "Attack not found." }
-  attack.status = "cancelled"
-  const message = `DM cancelled ${getActorLabel(session, attack.attacker)}'s attack on ${getActorLabel(session, attack.target)}.`
-  addCombatLog(session, message)
-  return { consumed: true, message, activeAttack: attack }
+export interface MonsterAttackResult extends RollConsumeResult {
+  needsRoll?: boolean
+}
+
+export function monsterAttack(
+  session: Session,
+  attackerActor: CombatActor,
+  targetActor: CombatActor,
+  dmUserId: string
+): MonsterAttackResult {
+  if (session.monsterRollMode === "auto") {
+    const roll = Math.floor(Math.random() * 20) + 1
+    const activeAttack: ActiveAttack = {
+      id: nextId("atk"),
+      attacker: attackerActor,
+      target: targetActor,
+      attackValue: roll,
+      attackRollText: `auto 1d20 = ${roll}`,
+      requestedByUserId: dmUserId,
+      status: "awaiting_response",
+      createdAt: Date.now(),
+    }
+    session.activeAttacks = [
+      activeAttack,
+      ...session.activeAttacks.filter((a) => a.status === "awaiting_response").slice(0, 4),
+    ]
+    const message = `${getActorLabelWithId(session, attackerActor)} โจมตี ${getActorLabel(session, targetActor)} ด้วย ${roll} - รอการตอบสนอง`
+    return { consumed: true, message, activeAttack }
+  }
+
+  // manual -DM ทอยกับ Rollem เอง
+  startPendingAction(session, {
+    userId: dmUserId,
+    type: "attack",
+    source: attackerActor,
+    target: targetActor,
+  })
+  const message = `${getActorLabelWithId(session, attackerActor)} กำลังโจมตี ${getActorLabel(session, targetActor)} - DM ทอยเต๋าตอนนี้!`
+  return { consumed: true, message, needsRoll: true }
 }
 
 export function actionLabel(type: CombatActionType): string {

@@ -1,7 +1,8 @@
 import "dotenv/config"
 import { Message } from "discord.js"
+import { Player } from "./types/session"
 import client from "./bot"
-import { buildAttackResponseRow, handleInteraction, updateCombatMessage } from "./handlers/interactionHandler"
+import { buildAttackResponseRow, buildRollIntentMessage, handleInteraction, updateCombatMessage } from "./handlers/interactionHandler"
 import * as combatManager from "./systems/combatManager"
 import * as sessionManager from "./systems/sessionManager"
 import { Session } from "./types/session"
@@ -30,18 +31,29 @@ function parseRollemTotal(content: string): number | null {
   return null
 }
 
-async function resolveRollerUserId(message: Message, session: Session): Promise<string | null> {
-  // 1. Rollem reply ต่อ message ของ user → ดู reference
+interface RollerIdentity {
+  userId: string
+  matchedPlayer?: Player  // Tupper webhook ที่ map กับ player slot โดยตรง
+}
+
+async function resolveRollerIdentity(message: Message, session: Session): Promise<RollerIdentity | null> {
   if (message.reference?.messageId) {
     try {
       const ref = await message.fetchReference()
-      return ref.author.id
+      if (!ref.author.bot) return { userId: ref.author.id }
+      // Tupper webhook — หา player ที่ tupperName ตรงกัน
+      const refUsername = ref.author.username.toLowerCase()
+      const matched = session.players.find(
+        (p): p is Player => p !== null && p.name !== "" && !!p.tupperName &&
+        p.tupperName.toLowerCase() === refUsername
+      )
+      if (matched) return { userId: matched.userId, matchedPlayer: matched }
     } catch { /* fall through */ }
   }
-  // 2. fallback: ถ้ามี pending action คนเดียวใน session
-  if (session.pendingActions.length === 1) {
-    return session.pendingActions[0].userId
-  }
+  // fallback: lastActiveTupper — ใช้ตัวละครที่โรลเพลย์ล่าสุด
+  // หา userId ที่มี lastActiveTupper และ Rollem reply อยู่ใน context ของคนนั้น
+  // ไม่สามารถรู้ได้จาก message อย่างเดียว → ใช้ pendingAction แทน
+  if (session.pendingActions.length === 1) return { userId: session.pendingActions[0].userId }
   return null
 }
 
@@ -51,19 +63,45 @@ client.on("messageCreate", async (message) => {
   // DEBUG: log every bot message to see what arrives
   console.log(`[MSG] bot="${message.author.username}" id="${message.author.id}" content="${message.content.slice(0, 80)}" channel=${message.channelId}`)
 
+  // track Tupper webhook → อัปเดต lastActiveTupper ทันทีที่เห็น Tupper โพสต์
+  const tupperSession = sessionManager.getSession(message.channelId)
+  if (tupperSession && !isRollemBot(message)) {
+    const username = message.author.username.toLowerCase()
+    const matched = tupperSession.players.find(
+      (p): p is Player => p !== null && p.name !== "" && !!p.tupperName &&
+      p.tupperName.toLowerCase() === username
+    )
+    if (matched) {
+      tupperSession.lastActiveTupper[matched.userId] = matched.slotIndex
+      console.log(`[TUPPER] updated lastActiveTupper: ${matched.userId} → slot ${matched.slotIndex} (${matched.name})`)
+    }
+  }
+
   if (!isRollemBot(message)) return
 
   const session = sessionManager.getSession(message.channelId)
-  console.log(`[ROLLEM] session=${!!session} pendingCount=${session?.pendingActions.length ?? 0}`)
-  if (!session || session.pendingActions.length === 0) return
+  console.log(`[ROLLEM] session=${!!session} state=${session?.state} pendingCount=${session?.pendingActions.length ?? 0}`)
+  if (!session || session.state !== "combat") return
 
   const value = parseRollemTotal(message.content)
   console.log(`[ROLLEM] parsed value=${value} from content="${message.content.slice(0, 80)}"`)
   if (value === null) return
 
-  const userId = await resolveRollerUserId(message, session)
-  console.log(`[ROLLEM] resolvedUserId=${userId}`)
-  if (!userId) return
+  const identity = await resolveRollerIdentity(message, session)
+  console.log(`[ROLLEM] resolvedUserId=${identity?.userId} matchedPlayer=${identity?.matchedPlayer?.name}`)
+  if (!identity) return
+  const { userId, matchedPlayer } = identity
+
+  // ถ้าไม่มี pendingAction → ถาม intent ก่อน (roll-first flow)
+  const hasPending = session.pendingActions.some((a) => a.userId === userId)
+  if (!hasPending) {
+    const intentMsg = buildRollIntentMessage(session, userId, value, message.content, matchedPlayer)
+    if (intentMsg) {
+      const sent = await message.channel.send(intentMsg).catch(console.error)
+      if (sent) setTimeout(() => sent.delete().catch(() => {}), 60_000)
+    }
+    return
+  }
 
   const result = combatManager.consumeRollemRoll(session, userId, value, message.content)
   console.log(`[ROLLEM] consumed=${result.consumed} message="${result.message}"`)
@@ -71,17 +109,18 @@ client.on("messageCreate", async (message) => {
 
   if (result.message) {
     if (result.activeAttack && result.activeAttack.status === "awaiting_response") {
-      // attack landed on a player target — send action buttons directly in channel
       const targetEntity = combatManager.getActorEntity(session, result.activeAttack.target)
-      const targetMention = targetEntity && "userId" in targetEntity ? `<@${targetEntity.userId}>` : ""
+      const targetMention = targetEntity && "userId" in targetEntity ? `<@${(targetEntity as Player).userId}>` : ""
       await message.channel.send({
-        content: `${result.message}\n${targetMention} — choose your response:`,
+        content: `${result.message}\n${targetMention} - choose your response:`,
         components: [buildAttackResponseRow(result.activeAttack.id)],
       }).catch(console.error)
     } else {
       await message.channel.send(result.message).catch(console.error)
     }
   }
+  if (result.deathMessage) await message.channel.send(result.deathMessage).catch(console.error)
+  if (result.sessionEnded) await message.channel.send(">>> # ดำเนินการระบบเสร็จสิ้น").catch(console.error)
   await updateCombatMessage(session, client).catch(console.error)
 })
 

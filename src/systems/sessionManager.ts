@@ -1,4 +1,4 @@
-import { Enemy, Session } from "../types/session"
+import { Enemy, MonsterRollMode, Session } from "../types/session"
 
 const sessions = new Map<string, Session>()
 const lobbyIndex = new Map<string, string>()
@@ -21,6 +21,8 @@ export function createSession(
     pendingActions: [],
     activeAttacks: [],
     combatLog: [],
+    monsterRollMode: "manual",
+    lastActiveTupper: {},
   }
   sessions.set(channelId, session)
   return session
@@ -72,7 +74,7 @@ export function releaseSlot(channelId: string, slotIndex: number, requestingUser
 
 export function registerPlayer(
   channelId: string,
-  data: { userId: string; slotIndex: number; name: string; className: string; maxHp: number }
+  data: { userId: string; slotIndex: number; name: string; className: string; maxHp: number; tupperName?: string }
 ): boolean {
   const session = sessions.get(channelId)
   if (!session) return false
@@ -83,6 +85,7 @@ export function registerPlayer(
   slot.className = data.className
   slot.maxHp = data.maxHp
   slot.hp = data.maxHp
+  slot.tupperName = data.tupperName
   return true
 }
 
@@ -139,6 +142,12 @@ export function setCombatMessageId(channelId: string, messageId: string): void {
   const session = sessions.get(channelId)
   if (!session) return
   session.combatMessageId = messageId
+}
+
+export function setMonsterRollMode(channelId: string, mode: MonsterRollMode): void {
+  const session = sessions.get(channelId)
+  if (!session) return
+  session.monsterRollMode = mode
 }
 
 export function endSession(channelId: string): void {
