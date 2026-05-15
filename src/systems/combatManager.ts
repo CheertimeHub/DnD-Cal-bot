@@ -15,6 +15,8 @@ export interface RollConsumeResult {
   deathMessage?: string
   activeAttack?: ActiveAttack
   sessionEnded?: boolean
+  counterAttack?: ActiveAttack  // มอนตีกลับอัตโนมัติ
+  counterMessage?: string
 }
 
 function nextId(prefix: string): string {
@@ -193,7 +195,31 @@ export function consumeRollemRoll(
       const death = died ? deathMessage(session, pending.target) : undefined
       const sessionEnded = died && checkAllEnemiesDead(session)
       if (sessionEnded) session.state = "ended"
-      return { consumed: true, message, deathMessage: death, sessionEnded }
+
+      // มอนตีกลับถ้ายังมีชีวิตอยู่
+      let counterAttack: ActiveAttack | undefined
+      let counterMessage: string | undefined
+      if (!died && hp > 0 && pending.source.type === "player") {
+        const counterRoll = Math.floor(Math.random() * hp) + 1
+        counterAttack = {
+          id: nextId("atk"),
+          attacker: pending.target,
+          target: pending.source,
+          attackValue: counterRoll,
+          attackRollText: `counter 1d${hp} = ${counterRoll}`,
+          requestedByUserId: userId,
+          status: "awaiting_response",
+          createdAt: Date.now(),
+        }
+        session.activeAttacks = [
+          counterAttack,
+          ...session.activeAttacks.filter((a) => a.status === "awaiting_response").slice(0, 4),
+        ]
+        counterMessage = `${label} โต้กลับ ${getActorLabel(session, pending.source)} ด้วย ${counterRoll} - รอการตอบสนอง`
+        addCombatLog(session, counterMessage)
+      }
+
+      return { consumed: true, message, deathMessage: death, sessionEnded, counterAttack, counterMessage }
     }
 
     const activeAttack: ActiveAttack = {
@@ -216,6 +242,25 @@ export function consumeRollemRoll(
 
   if (pending.type === "dodge") {
     return resolveDodge(session, pending.activeAttackId ?? "", userId, numericValue)
+  }
+
+  if (pending.type === "defend") {
+    return resolveDefend(session, pending.activeAttackId ?? "", userId, numericValue)
+  }
+
+  if (pending.type === "cc" || pending.type === "buff") {
+    const actor = getActorEntity(session, pending.source)
+    const stats = actor && "stats" in actor ? (actor as Player).stats : undefined
+    const threshold = stats?.scr ?? 0
+    const success = resolveStatRoll(numericValue, threshold)
+    const sourceName = getActorLabel(session, pending.source)
+    const targetName = getActorLabel(session, pending.target)
+    const actionWord = pending.type === "cc" ? "CC" : "Buff/Debuff"
+    const message = success
+      ? `🔮 ${sourceName} ใช้ ${actionWord} ต่อ ${targetName} สำเร็จ! (${numericValue} ≤ ${threshold} SCR) — DM จัดการ effect`
+      : `🔮 ${sourceName} ใช้ ${actionWord} ต่อ ${targetName} ล้มเหลว (${numericValue} > ${threshold} SCR)`
+    addCombatLog(session, message)
+    return { consumed: true, message }
   }
 
   return { consumed: true }
@@ -281,6 +326,57 @@ export function resolveDodge(
   return { consumed: true, message, deathMessage: death, activeAttack: attack }
 }
 
+export function requestDefend(session: Session, attackId: string, userId: string): RollConsumeResult {
+  const attack = session.activeAttacks.find((a) => a.id === attackId && a.status === "awaiting_response")
+  if (!attack) return { consumed: false, message: "ไม่พบการโจมตี" }
+  if (!canRespondForTarget(session, userId, attack.target)) {
+    return { consumed: false, message: "คุณไม่สามารถป้องกันแทนเป้าหมายนี้ได้" }
+  }
+  const actor = getActorEntity(session, attack.target)
+  const defStat = actor && "stats" in actor ? ((actor as Player).stats?.def ?? 0) : 0
+  startPendingAction(session, {
+    userId,
+    type: "defend",
+    source: attack.target,
+    target: attack.attacker,
+    activeAttackId: attack.id,
+  })
+  const message = `🔰 ${getActorLabel(session, attack.target)} ป้องกัน — ทอย d20+${defStat} DEF ตอนนี้!`
+  return { consumed: true, message, activeAttack: attack }
+}
+
+export function resolveDefend(
+  session: Session,
+  attackId: string,
+  userId: string,
+  rollValue: number
+): RollConsumeResult {
+  const attack = session.activeAttacks.find((a) => a.id === attackId && a.status === "awaiting_response")
+  if (!attack) return { consumed: true, message: "ไม่พบการโจมตี" }
+  if (!canRespondForTarget(session, userId, attack.target)) {
+    return { consumed: true, message: "คุณไม่สามารถป้องกันแทนเป้าหมายนี้ได้" }
+  }
+
+  const actor = getActorEntity(session, attack.target)
+  const defStat = actor && "stats" in actor ? ((actor as Player).stats?.def ?? 0) : 0
+  const totalDefend = rollValue + defStat
+  attack.status = "resolved"
+
+  if (totalDefend >= attack.attackValue) {
+    const message = `🔰 ${getActorLabel(session, attack.target)} ป้องกันสำเร็จ (${rollValue}+${defStat}=${totalDefend} vs ${attack.attackValue})`
+    addCombatLog(session, message)
+    return { consumed: true, message, activeAttack: attack }
+  }
+
+  const remainingDmg = attack.attackValue - totalDefend
+  const { hp, died } = damageActor(session, attack.target, remainingDmg)
+  const label = getActorLabelWithId(session, attack.target)
+  const message = `🔰 ${label} ป้องกันบางส่วน (${rollValue}+${defStat}=${totalDefend} vs ${attack.attackValue}) รับดาเมจ ${remainingDmg} (เหลือ ${hp ?? 0} HP)`
+  addCombatLog(session, message)
+  const death = died ? deathMessage(session, attack.target) : undefined
+  return { consumed: true, message, deathMessage: death, activeAttack: attack }
+}
+
 export function cancelAttack(session: Session, attackId: string, userId: string): RollConsumeResult {
   if (session.hostId !== userId) return { consumed: false, message: "เฉพาะ DM เท่านั้นที่ยกเลิกการโจมตีได้" }
   const attack = session.activeAttacks.find((a) => a.id === attackId && a.status === "awaiting_response")
@@ -336,5 +432,13 @@ export function actionLabel(type: CombatActionType): string {
   if (type === "attack") return "Attack"
   if (type === "damage") return "Damage"
   if (type === "heal") return "Heal"
+  if (type === "cc") return "CC"
+  if (type === "buff") return "Buff/Debuff"
+  if (type === "defend") return "Defend"
   return "Dodge"
+}
+
+export function resolveStatRoll(rollValue: number, threshold: number): boolean {
+  if (threshold <= 0) return false
+  return rollValue <= threshold
 }

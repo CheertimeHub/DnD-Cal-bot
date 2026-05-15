@@ -1,4 +1,5 @@
-import { ChannelType, Guild, ThreadChannel } from "discord.js"
+import { ChannelType, Guild, Message, ThreadChannel } from "discord.js"
+import { PlayerStats } from "../types/session"
 
 async function findThread(
   guild: Guild,
@@ -38,6 +39,15 @@ async function getHpFromThread(thread: ThreadChannel): Promise<number | null> {
   } catch {
     return null
   }
+}
+
+export async function findThreadIdByName(
+  guild: Guild,
+  forumChannelId: string,
+  name: string
+): Promise<string | null> {
+  const thread = await findThread(guild, forumChannelId, name)
+  return thread?.id ?? null
 }
 
 export async function listForumThreads(
@@ -94,6 +104,49 @@ export async function findForumPostImage(
     if (!thread) return null
     return getImageFromThread(thread)
   } catch {
+    return null
+  }
+}
+
+function extractStatsFromText(text: string): Partial<PlayerStats> {
+  const result: Partial<PlayerStats> = {}
+  const pattern = /\b(CORE|MNF|RFX|SCR|DEF)\s*:\s*(\d+)/gi
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text)) !== null) {
+    const key = match[1].toLowerCase() as keyof PlayerStats
+    result[key] = parseInt(match[2], 10)
+  }
+  return result
+}
+
+export async function parseStatsFromThread(
+  guild: Guild,
+  threadId: string
+): Promise<PlayerStats | null> {
+  try {
+    const thread = await guild.channels.fetch(threadId)
+    if (!thread || !("messages" in thread)) return null
+    const tc = thread as ThreadChannel
+    // fetch ล่าสุด 50 messages แล้วหาค่าที่ครบที่สุด (message ล่าสุดที่มี >= 1 stat)
+    const fetched = await tc.messages.fetch({ limit: 50 })
+    const sorted = [...fetched.values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp)
+    const accumulated: Partial<PlayerStats> = {}
+    for (const msg of sorted) {
+      const found = extractStatsFromText(msg.content)
+      // merge — ค่าจาก message ใหม่กว่าชนะ
+      Object.assign(accumulated, found)
+      if (Object.keys(accumulated).length >= 5) break
+    }
+    if (Object.keys(accumulated).length === 0) return null
+    return {
+      core: accumulated.core ?? 0,
+      mnf: accumulated.mnf ?? 0,
+      rfx: accumulated.rfx ?? 0,
+      scr: accumulated.scr ?? 0,
+      def: accumulated.def ?? 0,
+    }
+  } catch (e) {
+    console.log(`[FORUM] parseStatsFromThread error: ${e}`)
     return null
   }
 }

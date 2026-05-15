@@ -26,13 +26,16 @@ import {
   buildPlayerEmbed,
 } from "../utils/embed"
 import { getDefaultHp } from "../utils/classHp"
-import { findForumMonsterStat, findForumPostImage, getImageFromThreadId, listForumThreads } from "../utils/forumSearch"
+import { findForumMonsterStat, findForumPostImage, findThreadIdByName, getImageFromThreadId, listForumThreads, parseStatsFromThread } from "../utils/forumSearch"
 import { CombatActionType, CombatActor, Player, Session } from "../types/session"
 
 // ── pending spawn ─────────────────────────────────────────────────────────────
 
 interface PendingSpawn { name: string; count: number; hp: number; imageUrl: string | null }
 const pendingSpawns = new Map<string, PendingSpawn>()
+
+// เก็บ spawn manual data แยก เพราะชื่อมอนอาจยาวเกิน customId 100 ตัว
+const pendingSpawnManual = new Map<string, { name: string; count: number }>()
 
 // เก็บ rollText ไว้แยกต่างหาก เพราะ customId จำกัด 100 ตัวอักษร
 const pendingRollTexts = new Map<string, string>()  // key = `${userId}_${value}` → rollText
@@ -101,6 +104,7 @@ export async function updateCombatMessage(session: Session, client: Client): Pro
 export function buildAttackResponseRow(attackId: string): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`combat_dodge_${attackId}`).setLabel("🛡️ Dodge").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`combat_defend_${attackId}`).setLabel("🔰 Defend").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`combat_take_${attackId}`).setLabel("⚔️ Take Hit").setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId(`combat_cancel_${attackId}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
   )
@@ -114,14 +118,21 @@ function buildCombatActionRows(session: Session): ActionRowBuilder<ButtonBuilder
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId("combat_action_attack").setLabel("⚔️ Attack").setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId("combat_action_heal").setLabel("🩹 Heal").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId("combat_action_monster").setLabel("🐉 Monster Attack").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("combat_action_monster").setLabel("🐉 Monster").setStyle(ButtonStyle.Secondary),
+      )
+    )
+    rows.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId("combat_action_cc").setLabel("🔮 CC").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("combat_action_buff").setLabel("✨ Buff/Debuff").setStyle(ButtonStyle.Primary),
       )
     )
 
-    for (const attack of session.activeAttacks.filter((a) => a.status === "awaiting_response").slice(0, 4)) {
+    for (const attack of session.activeAttacks.filter((a) => a.status === "awaiting_response").slice(0, 3)) {
       rows.push(
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder().setCustomId(`combat_dodge_${attack.id}`).setLabel("🛡️ Dodge").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`combat_defend_${attack.id}`).setLabel("🔰 Defend").setStyle(ButtonStyle.Secondary),
           new ButtonBuilder().setCustomId(`combat_take_${attack.id}`).setLabel("⚔️ Take Hit").setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(`combat_cancel_${attack.id}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
         )
@@ -143,11 +154,16 @@ function buildTargetSelect(
 ): ActionRowBuilder<StringSelectMenuBuilder> | null {
   const sourceKey = combatManager.encodeActor(source)
   let actors: CombatActor[]
-  if (action === "heal") {
-    // heal: เฉพาะ player (รวม dead), ไม่กรอง source ออก
+  if (action === "heal" || action === "buff") {
+    // heal/buff: เฉพาะ player (รวม dead), ไม่กรอง source ออก
     actors = combatManager.getActors(session).filter((a) => a.type === "player")
+  } else if (action === "cc") {
+    // cc: เป้าหมายได้ทั้ง player และ enemy ที่ยังมีชีวิต, ไม่รวม source
+    actors = combatManager.getActors(session, true).filter(
+      (a) => combatManager.encodeActor(a) !== sourceKey
+    )
   } else {
-    // attack: เฉพาะ actor ที่ยังมีชีวิต, ไม่รวม source
+    // attack/dodge/defend/explore: เฉพาะ actor ที่ยังมีชีวิต, ไม่รวม source
     actors = combatManager.getActors(session, true).filter(
       (a) => combatManager.encodeActor(a) !== sourceKey
     )
@@ -238,9 +254,10 @@ function buildSpawnConfirmRow() {
   )
 }
 
-function buildSpawnManualRow(name: string, count: number) {
+function buildSpawnManualRow(userId: string, name: string, count: number) {
+  pendingSpawnManual.set(userId, { name, count })
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`spawn_manual_${encodeURIComponent(`${name}|||${count}`)}`).setLabel("Enter stat manually").setStyle(ButtonStyle.Primary)
+    new ButtonBuilder().setCustomId("spawn_manual").setLabel("Enter stat manually").setStyle(ButtonStyle.Primary)
   )
 }
 
@@ -426,11 +443,10 @@ async function handleSpawnEditButton(interaction: ButtonInteraction) {
 }
 
 async function handleSpawnManualButton(interaction: ButtonInteraction) {
-  const decoded = decodeURIComponent(interaction.customId.replace("spawn_manual_", ""))
-  const [name, countStr] = decoded.split("|||")
-  const count = parseInt(countStr, 10)
-  if (!name || isNaN(count)) { await interaction.reply({ content: "Invalid data. Try /spawn-monster again.", ephemeral: true }); return }
-  await interaction.showModal(makeSpawnMonsterStatModal(name, count))
+  const data = pendingSpawnManual.get(interaction.user.id)
+  if (!data) { await interaction.reply({ content: "Spawn expired. Try /spawn-monster again.", ephemeral: true }); return }
+  pendingSpawnManual.delete(interaction.user.id)
+  await interaction.showModal(makeSpawnMonsterStatModal(data.name, data.count))
 }
 
 // ── select menu handlers ──────────────────────────────────────────────────────
@@ -440,6 +456,26 @@ async function handleForumSelectMenu(interaction: StringSelectMenuInteraction, c
   if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
   if (session.hostId !== interaction.user.id) { await interaction.reply({ content: "Only DM can choose this.", ephemeral: true }); return }
   sessionManager.setForumChannel(session.channelId, interaction.values[0])
+
+  // ถามต่อว่าคลังมอนสเตอร์อยู่ใน Forum ไหน
+  const guild = await client.guilds.fetch(session.guildId)
+  const allChannels = await guild.channels.fetch()
+  const forumChannels = allChannels.filter((ch): ch is ForumChannel => ch?.type === ChannelType.GuildForum)
+  const options = forumChannels.map((ch) => ({ label: ch.name, value: ch.id })).slice(0, 25)
+  const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId("select_monster_forum_channel")
+      .setPlaceholder("เลือก Forum คลังมอนสเตอร์")
+      .addOptions(options)
+  )
+  await interaction.update({ content: "เลือก Forum สำหรับคลังมอนสเตอร์:", components: [row] })
+}
+
+async function handleMonsterForumSelectMenu(interaction: StringSelectMenuInteraction, client: Client) {
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
+  if (session.hostId !== interaction.user.id) { await interaction.reply({ content: "Only DM can choose this.", ephemeral: true }); return }
+  sessionManager.setMonsterForumChannel(session.channelId, interaction.values[0])
   await postLobbyEmbed(session, interaction.channel as TextChannel, client)
   await interaction.update({ content: "Session opened.", components: [] })
 }
@@ -504,18 +540,20 @@ async function handleSetupSessionModal(interaction: ModalSubmitInteraction, clie
   }
   if (forumChannels.size === 1) {
     sessionManager.setForumChannel(session.channelId, forumChannels.first()!.id)
+    sessionManager.setMonsterForumChannel(session.channelId, forumChannels.first()!.id)
     await postLobbyEmbed(session, channel, client)
     await interaction.reply({ content: `Lobby opened with ${count} slots.`, ephemeral: true })
     return
   }
 
+  const options = forumChannels.map((ch) => ({ label: ch.name, value: ch.id })).slice(0, 25)
   const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId("select_forum_channel")
-      .setPlaceholder("Choose Forum Channel for character images")
-      .addOptions(forumChannels.map((ch) => ({ label: ch.name, value: ch.id })).slice(0, 25))
+      .setPlaceholder("เลือก Forum ข้อมูลตัวละคร")
+      .addOptions(options)
   )
-  await interaction.reply({ content: "Multiple Forum Channels found. Choose one.", components: [row], ephemeral: true })
+  await interaction.reply({ content: "เลือก Forum สำหรับข้อมูลตัวละคร:", components: [row], ephemeral: true })
 }
 
 async function handleRegisterPlayerModal(interaction: ModalSubmitInteraction, client: Client) {
@@ -539,29 +577,32 @@ async function handleRegisterPlayerModal(interaction: ModalSubmitInteraction, cl
   const success = sessionManager.registerPlayer(session.channelId, { userId: interaction.user.id, slotIndex, name, className, maxHp, tupperName })
   if (!success) { await interaction.reply({ content: "Could not register this slot.", ephemeral: true }); return }
 
-  await interaction.reply({ content: `Registered **${name}** the **${className}** with ${maxHp} HP (Slot ${slotIndex + 1}).`, ephemeral: true })
-  updateLobbyMessage(sessionManager.getSession(session.channelId)!, client).catch(console.error)
-
-  // ถ้ามี forum → ให้เลือก thread เพื่อ link รูป (เฉพาะถ้าไม่มี tupperName หรือยังไม่มี avatarUrl)
   const updatedSession = sessionManager.getSession(session.channelId)!
   const registeredPlayer = updatedSession.players[slotIndex]
-  if (updatedSession.forumChannelId && registeredPlayer && !registeredPlayer.avatarUrl) {
+
+  // ถ้ามี forum → ค้นหา thread ที่ชื่อตรงกับตัวละครแล้วดึงรูป + stat อัตโนมัติ
+  let forumNote = ""
+  if (updatedSession.forumChannelId && registeredPlayer) {
     try {
       const guild = await client.guilds.fetch(updatedSession.guildId)
-      const threads = await listForumThreads(guild, updatedSession.forumChannelId)
-      if (threads.length > 0) {
-        const menu = new StringSelectMenuBuilder()
-          .setCustomId(`link_avatar_${slotIndex}`)
-          .setPlaceholder("เลือก thread ตัวละครของคุณ (ถ้ามีรูป)")
-          .addOptions(threads.map((t) => ({ label: t.name.slice(0, 100), value: t.id })))
-        await interaction.followUp({
-          content: "เลือก forum thread เพื่อดึงรูปตัวละคร (ข้ามได้ถ้าไม่ต้องการ):",
-          components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
-          ephemeral: true,
-        })
+      const threadId = await findThreadIdByName(guild, updatedSession.forumChannelId, name)
+      if (threadId) {
+        const [imageUrl, stats] = await Promise.all([
+          getImageFromThreadId(guild, threadId),
+          parseStatsFromThread(guild, threadId),
+        ])
+        if (imageUrl) registeredPlayer.avatarUrl = imageUrl
+        if (stats) registeredPlayer.stats = stats
+        const statLine = stats
+          ? `CORE:${stats.core} MNF:${stats.mnf} RFX:${stats.rfx} SCR:${stats.scr} DEF:${stats.def}`
+          : "ไม่พบ stat"
+        forumNote = `\nดึงข้อมูลจาก Forum: ${imageUrl ? "พบรูป" : "ไม่พบรูป"} | ${statLine}`
       }
     } catch { /* ไม่มี forum ก็ข้ามไป */ }
   }
+
+  await interaction.reply({ content: `Registered **${name}** the **${className}** with ${maxHp} HP (Slot ${slotIndex + 1}).${forumNote}`, ephemeral: true })
+  updateLobbyMessage(updatedSession, client).catch(console.error)
 }
 
 async function handleAdjustSlotsModal(interaction: ModalSubmitInteraction, client: Client) {
@@ -587,9 +628,10 @@ async function handleSpawnMonsterModal(interaction: ModalSubmitInteraction, clie
   const count = parseInt(interaction.fields.getTextInputValue("monster_count").trim(), 10)
   if (isNaN(count) || count < 1 || count > 20) { await interaction.reply({ content: "Count must be 1–20.", ephemeral: true }); return }
 
-  if (session.forumChannelId) {
+  const monsterForumId = session.monsterForumChannelId ?? session.forumChannelId
+  if (monsterForumId) {
     const guild = await client.guilds.fetch(session.guildId)
-    const stat = await findForumMonsterStat(guild, session.forumChannelId, name)
+    const stat = await findForumMonsterStat(guild, monsterForumId, name)
     if (stat) {
       pendingSpawns.set(interaction.user.id, { name, count, hp: stat.hp, imageUrl: stat.imageUrl })
       await interaction.reply({ embeds: [buildSpawnConfirmEmbed(name, count, stat.hp, stat.imageUrl)], components: [buildSpawnConfirmRow()], ephemeral: true })
@@ -597,7 +639,7 @@ async function handleSpawnMonsterModal(interaction: ModalSubmitInteraction, clie
     }
   }
 
-  await interaction.reply({ content: `Could not find **${name}** in Forum. Enter stats manually.`, components: [buildSpawnManualRow(name, count)], ephemeral: true })
+  await interaction.reply({ content: `Could not find **${name}** in Forum. Enter stats manually.`, components: [buildSpawnManualRow(interaction.user.id, name, count)], ephemeral: true })
 }
 
 async function handleSpawnMonsterStatModal(interaction: ModalSubmitInteraction, client: Client) {
@@ -614,6 +656,48 @@ async function handleSpawnMonsterStatModal(interaction: ModalSubmitInteraction, 
   await interaction.reply({ content: "Spawning...", ephemeral: true })
   await executeSpawn(session.channelId, session.guildId, name, count, hp, client)
   await interaction.editReply({ content: `Spawned **${name}** x${count}.` })
+}
+
+async function handleCombatCcOrBuffButton(interaction: ButtonInteraction, action: "cc" | "buff") {
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.reply({ content: "Session not found.", ephemeral: true }); return }
+
+  const controllable = combatManager.getActors(session, true).filter(
+    (a) => combatManager.canControlActor(session, interaction.user.id, a)
+  )
+  if (controllable.length === 0) { await interaction.reply({ content: "No actor you can control.", ephemeral: true }); return }
+
+  if (controllable.length === 1) {
+    const source = controllable[0]
+    const targetRow = buildTargetSelect(session, action, source)
+    if (!targetRow) { await interaction.reply({ content: "No valid targets.", ephemeral: true }); return }
+    await interaction.reply({
+      content: `**${combatManager.getActorLabel(session, source)}** → choose target:`,
+      components: [targetRow],
+      ephemeral: true,
+    })
+    return
+  }
+
+  const sourceRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`combat_source_${action}`)
+      .setPlaceholder(`Choose ${action === "cc" ? "CC" : "Buff/Debuff"} source`)
+      .addOptions(controllable.slice(0, 25).map((a) => actorOption(session, a)))
+  )
+  await interaction.reply({ content: "Choose actor:", components: [sourceRow], ephemeral: true })
+}
+
+async function handleCombatDefendButton(interaction: ButtonInteraction, client: Client) {
+  const attackId = interaction.customId.replace("combat_defend_", "")
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.reply({ content: "Session not found.", ephemeral: true }); return }
+
+  const result = combatManager.requestDefend(session, attackId, interaction.user.id)
+  if (!result.consumed) { await interaction.reply({ content: result.message ?? "Cannot defend.", ephemeral: true }); return }
+
+  await interaction.reply({ content: `${result.message}\nRoll now with Rollem (e.g. \`d20\`)`, ephemeral: true })
+  updateCombatMessage(session, client).catch(console.error)
 }
 
 // ── monster attack ────────────────────────────────────────────────────────────
@@ -737,7 +821,7 @@ export function buildRollIntentMessage(
   pendingRollTexts.set(rollKey, rollText)
   setTimeout(() => pendingRollTexts.delete(rollKey), 120_000)
 
-  const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+  const actionRow1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(`roll_intent_attack_${userId}_${value}_${sourceKey}`)
       .setLabel("⚔️ Attack")
@@ -747,6 +831,14 @@ export function buildRollIntentMessage(
       .setLabel("🩹 Heal")
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
+      .setCustomId(`roll_intent_cc_${userId}_${value}_${sourceKey}`)
+      .setLabel("🔮 CC")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`roll_intent_buff_${userId}_${value}_${sourceKey}`)
+      .setLabel("✨ Buff/Debuff")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
       .setCustomId(`roll_intent_cancel_${userId}`)
       .setLabel("ยกเลิก")
       .setStyle(ButtonStyle.Secondary),
@@ -754,7 +846,7 @@ export function buildRollIntentMessage(
 
   return {
     content: `**${combatManager.getActorLabel(session, source)}** ทอยได้ **${value}** -จะทำอะไร?`,
-    components: [actionRow],
+    components: [actionRow1],
   }
 }
 
@@ -762,7 +854,7 @@ async function handleRollIntentButton(interaction: ButtonInteraction, client: Cl
   const parts = interaction.customId.split("_")
   // roll_intent_{action}_{userId}_{value}_{sourceKey}
   // parts: [roll, intent, action, userId, value, sourceKey]
-  const action = parts[2] as "attack" | "heal" | "cancel"
+  const action = parts[2] as "attack" | "heal" | "cc" | "buff" | "cancel"
 
   if (action === "cancel") {
     await interaction.update({ content: "ยกเลิกแล้ว", components: [] })
@@ -838,6 +930,15 @@ async function handleRollIntentTargetSelect(interaction: StringSelectMenuInterac
   if (result.deathMessage) await channel.send(result.deathMessage).catch(console.error)
   if (result.sessionEnded) await channel.send(">>> # ดำเนินการระบบเสร็จสิ้น").catch(console.error)
 
+  if (result.counterAttack && result.counterMessage) {
+    const targetEntity = combatManager.getActorEntity(session, result.counterAttack.target)
+    const mention = targetEntity && "userId" in targetEntity ? `<@${(targetEntity as import("../types/session").Player).userId}>` : ""
+    await channel.send({
+      content: `${result.counterMessage}\n${mention} - choose your response:`,
+      components: [buildAttackResponseRow(result.counterAttack.id)],
+    }).catch(console.error)
+  }
+
   await updateCombatMessage(session, client).catch(console.error)
 }
 
@@ -865,13 +966,18 @@ async function handleLinkAvatarSelect(interaction: StringSelectMenuInteraction, 
   const threadId = interaction.values[0]
   try {
     const guild = await client.guilds.fetch(session.guildId)
-    const imageUrl = await getImageFromThreadId(guild, threadId)
-    if (imageUrl) {
-      player.avatarUrl = imageUrl
-      await interaction.update({ content: `เชื่อม thread สำเร็จ`, components: [] })
-    } else {
-      await interaction.update({ content: "ไม่พบรูปใน thread นั้น (ลองเลือก thread อื่น)", components: [] })
-    }
+    const [imageUrl, stats] = await Promise.all([
+      getImageFromThreadId(guild, threadId),
+      parseStatsFromThread(guild, threadId),
+    ])
+    if (imageUrl) player.avatarUrl = imageUrl
+    if (stats) player.stats = stats
+
+    const statLine = stats
+      ? `CORE:${stats.core} MNF:${stats.mnf} RFX:${stats.rfx} SCR:${stats.scr} DEF:${stats.def}`
+      : "ไม่พบ stat"
+    const imgLine = imageUrl ? "พบรูป" : "ไม่พบรูป"
+    await interaction.update({ content: `เชื่อม thread สำเร็จ (${imgLine} | ${statLine})`, components: [] })
   } catch {
     await interaction.update({ content: "เกิดข้อผิดพลาด ลองใหม่อีกครั้ง", components: [] })
   }
@@ -893,18 +999,22 @@ export async function handleInteraction(interaction: Interaction, client: Client
     if (interaction.customId === "start_session") return handleStartSessionButton(interaction, client)
     if (interaction.customId === "combat_action_attack") return handleCombatAttackButton(interaction)
     if (interaction.customId === "combat_action_heal") return handleCombatHealButton(interaction)
+    if (interaction.customId === "combat_action_cc") return handleCombatCcOrBuffButton(interaction, "cc")
+    if (interaction.customId === "combat_action_buff") return handleCombatCcOrBuffButton(interaction, "buff")
     if (interaction.customId.startsWith("combat_dodge_")) return handleCombatDodgeButton(interaction, client)
+    if (interaction.customId.startsWith("combat_defend_")) return handleCombatDefendButton(interaction, client)
     if (interaction.customId.startsWith("combat_take_")) return handleCombatTakeButton(interaction, client)
     if (interaction.customId.startsWith("combat_cancel_")) return handleCombatCancelButton(interaction, client)
     if (interaction.customId === "spawn_confirm") return handleSpawnConfirmButton(interaction, client)
     if (interaction.customId === "spawn_edit") return handleSpawnEditButton(interaction)
-    if (interaction.customId.startsWith("spawn_manual_")) return handleSpawnManualButton(interaction)
+    if (interaction.customId === "spawn_manual") return handleSpawnManualButton(interaction)
     if (interaction.customId.startsWith("roll_intent_")) return handleRollIntentButton(interaction, client)
     if (interaction.customId === "combat_action_monster") return handleCombatMonsterButton(interaction, client)
   }
 
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === "select_forum_channel") return handleForumSelectMenu(interaction, client)
+    if (interaction.customId === "select_monster_forum_channel") return handleMonsterForumSelectMenu(interaction, client)
     if (interaction.customId.startsWith("combat_source_")) return handleCombatSourceSelect(interaction)
     if (interaction.customId.startsWith("combat_target_")) return handleCombatTargetSelect(interaction, client)
     if (interaction.customId.startsWith("roll_intent_target_")) return handleRollIntentTargetSelect(interaction, client)

@@ -1,4 +1,4 @@
-import { Enemy, MonsterRollMode, Session } from "../types/session"
+import { Enemy, MonsterRollMode, PlayerStats, Session } from "../types/session"
 
 const sessions = new Map<string, Session>()
 const lobbyIndex = new Map<string, string>()
@@ -117,6 +117,12 @@ export function setForumChannel(channelId: string, forumChannelId: string): void
   session.forumChannelId = forumChannelId
 }
 
+export function setMonsterForumChannel(channelId: string, forumChannelId: string): void {
+  const session = sessions.get(channelId)
+  if (!session) return
+  session.monsterForumChannelId = forumChannelId
+}
+
 export function spawnEnemies(
   channelId: string,
   name: string,
@@ -148,6 +154,15 @@ export function setMonsterRollMode(channelId: string, mode: MonsterRollMode): vo
   const session = sessions.get(channelId)
   if (!session) return
   session.monsterRollMode = mode
+}
+
+export function updatePlayerStats(channelId: string, slotIndex: number, stats: PlayerStats): boolean {
+  const session = sessions.get(channelId)
+  if (!session) return false
+  const player = session.players[slotIndex]
+  if (!player) return false
+  player.stats = stats
+  return true
 }
 
 export function endSession(channelId: string): void {

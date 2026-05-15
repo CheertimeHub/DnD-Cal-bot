@@ -74,7 +74,9 @@ client.on("messageCreate", async (message) => {
     )
     if (matched) {
       tupperSession.lastActiveTupper[matched.userId] = matched.slotIndex
-      matched.avatarUrl = message.author.avatarURL({ extension: "png", size: 256 }) ?? message.author.displayAvatarURL({ size: 256 })
+      if (!matched.avatarUrl) {
+        matched.avatarUrl = message.author.avatarURL({ extension: "png", size: 256 }) ?? message.author.displayAvatarURL({ size: 256 })
+      }
       console.log(`[TUPPER] updated lastActiveTupper: ${matched.userId} → slot ${matched.slotIndex} (${matched.name}) avatar=${matched.avatarUrl}`)
       if (tupperSession.state === "lobby") {
         updateLobbyMessage(tupperSession, client).catch(console.error)
@@ -130,6 +132,17 @@ client.on("messageCreate", async (message) => {
   }
   if (result.deathMessage) await message.channel.send(result.deathMessage).catch(console.error)
   if (result.sessionEnded) await message.channel.send(">>> # ดำเนินการระบบเสร็จสิ้น").catch(console.error)
+
+  // มอนตีกลับ
+  if (result.counterAttack && result.counterMessage) {
+    const targetEntity = combatManager.getActorEntity(session, result.counterAttack.target)
+    const targetMention = targetEntity && "userId" in targetEntity ? `<@${(targetEntity as Player).userId}>` : ""
+    await message.channel.send({
+      content: `${result.counterMessage}\n${targetMention} - choose your response:`,
+      components: [buildAttackResponseRow(result.counterAttack.id)],
+    }).catch(console.error)
+  }
+
   await updateCombatMessage(session, client).catch(console.error)
 })
 

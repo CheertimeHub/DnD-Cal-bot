@@ -1,6 +1,14 @@
 export type SessionState = "lobby" | "combat" | "ended"
 export type MonsterRollMode = "manual" | "auto"
 
+export interface PlayerStats {
+  core: number  // ปริมาณเวท / จำนวน target
+  mnf: number   // ดาเมจ / ฮีล
+  rfx: number   // ความเร็ว / แม่นยำ / หลบ (max 12)
+  scr: number   // CC / Buff / Debuff (max 12)
+  def: number   // ป้องกัน / โต้กลับ
+}
+
 export interface Player {
   userId: string
   name: string
@@ -10,6 +18,7 @@ export interface Player {
   slotIndex: number
   tupperName?: string
   avatarUrl?: string
+  stats?: PlayerStats
 }
 
 export interface Enemy {
@@ -20,7 +29,7 @@ export interface Enemy {
 }
 
 export type CombatActorType = "player" | "enemy"
-export type CombatActionType = "attack" | "dodge" | "damage" | "heal"
+export type CombatActionType = "attack" | "dodge" | "damage" | "heal" | "cc" | "buff" | "defend"
 export type ActiveAttackStatus = "awaiting_response" | "resolved" | "cancelled"
 
 export interface CombatActor {
@@ -63,6 +72,7 @@ export interface Session {
   state: SessionState
   maxSlots: number
   forumChannelId?: string
+  monsterForumChannelId?: string
   enemies: Enemy[]
   combatMessageId?: string
   pendingActions: PendingRollAction[]
