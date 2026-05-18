@@ -40,6 +40,9 @@ const pendingSpawnManual = new Map<string, { name: string; count: number }>()
 // เก็บ rollText ไว้แยกต่างหาก เพราะ customId จำกัด 100 ตัวอักษร
 const pendingRollTexts = new Map<string, string>()  // key = `${userId}_${value}` → rollText
 
+// เก็บ CC target ไว้รอให้เลือก status
+export const pendingCcTargets = new Map<string, { targetKey: string; targetName: string }>()  // key = userId
+
 // ── shared helpers ────────────────────────────────────────────────────────────
 
 async function getLobbyMeta(session: Session, client: Client) {
@@ -658,6 +661,43 @@ async function handleSpawnMonsterStatModal(interaction: ModalSubmitInteraction, 
   await interaction.editReply({ content: `Spawned **${name}** x${count}.` })
 }
 
+export function buildCcStatusRow(userId: string, targetKey: string, targetName: string): ActionRowBuilder<StringSelectMenuBuilder> {
+  pendingCcTargets.set(userId, { targetKey, targetName })
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId("cc_status_select")
+      .setPlaceholder(`เลือกสถานะสำหรับ ${targetName}`)
+      .addOptions(CC_STATUSES)
+  )
+}
+
+const CC_STATUSES = [
+  { label: "❄️ Freeze", value: "Freeze" },
+  { label: "⚡ Stun", value: "Stun" },
+  { label: "🔥 Burn", value: "Burn" },
+  { label: "☠️ Poison", value: "Poison" },
+  { label: "🐌 Slow", value: "Slow" },
+  { label: "😵 Confuse", value: "Confuse" },
+  { label: "🔇 Silence", value: "Silence" },
+  { label: "👁️ Blind", value: "Blind" },
+]
+
+async function handleCcStatusSelect(interaction: StringSelectMenuInteraction, client: Client) {
+  const session = sessionManager.getSession(interaction.channelId!)
+  if (!session) { await interaction.update({ content: "Session not found.", components: [] }); return }
+
+  const pending = pendingCcTargets.get(interaction.user.id)
+  if (!pending) { await interaction.update({ content: "หมดเวลา ลองใหม่อีกครั้ง", components: [] }); return }
+  pendingCcTargets.delete(interaction.user.id)
+
+  const status = interaction.values[0]
+  const message = `🔮 ${pending.targetName} ติดสถานะ **${status}**!`
+  const channel = interaction.channel as TextChannel
+  await interaction.update({ content: "✅", components: [] })
+  await channel.send(message).catch(console.error)
+  await updateCombatMessage(session, client).catch(console.error)
+}
+
 async function handleCombatCcOrBuffButton(interaction: ButtonInteraction, action: "cc" | "buff") {
   const session = sessionManager.getSession(interaction.channelId!)
   if (!session) { await interaction.reply({ content: "Session not found.", ephemeral: true }); return }
@@ -924,6 +964,14 @@ async function handleRollIntentTargetSelect(interaction: StringSelectMenuInterac
       content: `${result.message}\n${mention} -choose your response:`,
       components: [buildAttackResponseRow(result.activeAttack.id)],
     }).catch(console.error)
+  } else if (result.ccSuccess) {
+    const targetKey = combatManager.encodeActor(result.ccSuccess.target)
+    const targetName = combatManager.getActorLabelWithId(session, result.ccSuccess.target)
+    const row = buildCcStatusRow(interaction.user.id, targetKey, targetName)
+    await channel.send({
+      content: `${result.message}\n<@${interaction.user.id}> เลือกสถานะ:`,
+      components: [row],
+    }).catch(console.error)
   } else if (result.message) {
     await channel.send(result.message).catch(console.error)
   }
@@ -1015,6 +1063,7 @@ export async function handleInteraction(interaction: Interaction, client: Client
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === "select_forum_channel") return handleForumSelectMenu(interaction, client)
     if (interaction.customId === "select_monster_forum_channel") return handleMonsterForumSelectMenu(interaction, client)
+    if (interaction.customId === "cc_status_select") return handleCcStatusSelect(interaction, client)
     if (interaction.customId.startsWith("combat_source_")) return handleCombatSourceSelect(interaction)
     if (interaction.customId.startsWith("combat_target_")) return handleCombatTargetSelect(interaction, client)
     if (interaction.customId.startsWith("roll_intent_target_")) return handleRollIntentTargetSelect(interaction, client)

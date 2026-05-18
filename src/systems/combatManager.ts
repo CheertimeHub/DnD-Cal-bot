@@ -15,8 +15,9 @@ export interface RollConsumeResult {
   deathMessage?: string
   activeAttack?: ActiveAttack
   sessionEnded?: boolean
-  counterAttack?: ActiveAttack  // มอนตีกลับอัตโนมัติ
+  counterAttack?: ActiveAttack
   counterMessage?: string
+  ccSuccess?: { target: CombatActor; sourceName: string }  // CC สำเร็จ → ให้เลือก status
 }
 
 function nextId(prefix: string): string {
@@ -254,11 +255,14 @@ export function consumeRollemRoll(
     const threshold = stats?.scr ?? 0
     const success = resolveStatRoll(numericValue, threshold)
     const sourceName = getActorLabel(session, pending.source)
-    const targetName = getActorLabel(session, pending.target)
+    const targetName = getActorLabelWithId(session, pending.target)
     const actionWord = pending.type === "cc" ? "CC" : "Buff/Debuff"
-    const message = success
-      ? `🔮 ${sourceName} ใช้ ${actionWord} ต่อ ${targetName} สำเร็จ! (${numericValue} ≤ ${threshold} SCR) — DM จัดการ effect`
-      : `🔮 ${sourceName} ใช้ ${actionWord} ต่อ ${targetName} ล้มเหลว (${numericValue} > ${threshold} SCR)`
+    if (success) {
+      const message = `🔮 ${sourceName} ใช้ ${actionWord} ต่อ ${targetName} สำเร็จ! (${numericValue} ≤ ${threshold} SCR)`
+      addCombatLog(session, message)
+      return { consumed: true, message, ccSuccess: { target: pending.target, sourceName } }
+    }
+    const message = `🔮 ${sourceName} ใช้ ${actionWord} ต่อ ${targetName} ล้มเหลว (${numericValue} > ${threshold} SCR)`
     addCombatLog(session, message)
     return { consumed: true, message }
   }

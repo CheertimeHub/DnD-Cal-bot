@@ -2,7 +2,7 @@ import "dotenv/config"
 import { Message } from "discord.js"
 import { Player } from "./types/session"
 import client from "./bot"
-import { buildAttackResponseRow, buildRollIntentMessage, handleInteraction, updateCombatMessage, updateLobbyMessage } from "./handlers/interactionHandler"
+import { buildAttackResponseRow, buildCcStatusRow, buildRollIntentMessage, handleInteraction, pendingCcTargets, updateCombatMessage, updateLobbyMessage } from "./handlers/interactionHandler"
 import * as combatManager from "./systems/combatManager"
 import * as sessionManager from "./systems/sessionManager"
 import { Session } from "./types/session"
@@ -125,6 +125,14 @@ client.on("messageCreate", async (message) => {
       await message.channel.send({
         content: `${result.message}\n${targetMention} - choose your response:`,
         components: [buildAttackResponseRow(result.activeAttack.id)],
+      }).catch(console.error)
+    } else if (result.ccSuccess) {
+      const targetKey = combatManager.encodeActor(result.ccSuccess.target)
+      const targetName = combatManager.getActorLabelWithId(session, result.ccSuccess.target)
+      const row = buildCcStatusRow(userId, targetKey, targetName)
+      await message.channel.send({
+        content: `${result.message}\n<@${userId}> เลือกสถานะ:`,
+        components: [row],
       }).catch(console.error)
     } else {
       await message.channel.send(result.message).catch(console.error)
